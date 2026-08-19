@@ -3,4 +3,5 @@ google-generativeai
 opencv-python
 mediapipe
 streamlit-webrtc
+av
 python-dotenv

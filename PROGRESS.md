@@ -8,7 +8,7 @@ This will be the basis for the final technical blog post.
 - [x] Environment setup
 - [x] Gemini API test script
 - [x] Streamlit chat UI
-- [ ] MediaPipe webcam facial/gaze analysis
+- [x] MediaPipe webcam facial/gaze analysis (WebRTC Streamer)
 - [ ] Adaptive teaching logic integration
 
 ### Log Details
