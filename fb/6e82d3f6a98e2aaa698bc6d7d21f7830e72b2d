@@ -1,0 +1,14 @@
+app.py
+  h_c6066df13fcc8f 10-13,15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "fb6e82d3f6a98e2aaa698bc6d7d21f7830e72b2d",
+  "prompts": {},
+  "humans": {
+    "h_c6066df13fcc8f": {
+      "author": "Kaizer-sardish <f20240563@pilani.bits-pilani.ac.in>"
+    }
+  }
+}
