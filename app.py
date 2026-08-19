@@ -31,41 +31,53 @@ model = genai.GenerativeModel(
     system_instruction=SYSTEM_PROMPT,
 )
 
-# --- MediaPipe Video Transformer ---
-mp_face_mesh = mp.solutions.face_mesh
-mp_drawing = mp.solutions.drawing_utils
-mp_drawing_styles = mp.solutions.drawing_styles
+# --- MediaPipe Tasks Face Landmarker Setup ---
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "face_landmarker.task")
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+
+def ensure_model_file():
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+    if not os.path.exists(MODEL_PATH):
+        import urllib.request
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+
+ensure_model_file()
+
+from mediapipe.tasks import python as mp_python
+from mediapipe.tasks.python import vision as mp_vision
 
 class VideoTransformer(VideoTransformerBase):
     def __init__(self):
-        self.face_mesh = mp_face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=False,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
+        base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
+        options = mp_vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            running_mode=mp_vision.RunningMode.IMAGE,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+            output_face_blendshapes=False
         )
+        self.detector = mp_vision.FaceLandmarker.create_from_options(options)
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        img = frame.to_ndarray(format="bgr24")
+        img_bgr = frame.to_ndarray(format="bgr24")
+        h, w, _ = img_bgr.shape
 
-        # Convert to RGB for MediaPipe
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        img_rgb.flags.writeable = False
-        results = self.face_mesh.process(img_rgb)
-        img_rgb.flags.writeable = True
+        # Convert to RGB for MediaPipe Image
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
 
-        # Draw mesh landmarks
-        if results.multi_face_landmarks:
-            for face_landmarks in results.multi_face_landmarks:
-                mp_drawing.draw_landmarks(
-                    image=img,
-                    landmark_list=face_landmarks,
-                    connections=mp_face_mesh.FACEMESH_TESSELATION,
-                    landmark_drawing_spec=None,
-                    connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_tesselation_style()
-                )
+        detection_result = self.detector.detect(mp_image)
 
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+        # Draw facial landmarks
+        if detection_result.face_landmarks:
+            for face_landmarks in detection_result.face_landmarks:
+                for lm in face_landmarks:
+                    cx, cy = int(lm.x * w), int(lm.y * h)
+                    cv2.circle(img_bgr, (cx, cy), 1, (0, 255, 0), -1)
+
+        return av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
 
 # --- Page Config ---
 st.set_page_config(page_title="Adaptive AI Tutor", layout="wide")
