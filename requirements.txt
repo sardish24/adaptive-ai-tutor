@@ -1,0 +1,6 @@
+streamlit
+google-generativeai
+opencv-python
+mediapipe
+streamlit-webrtc
+python-dotenv
