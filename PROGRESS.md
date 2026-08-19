@@ -5,6 +5,18 @@ This will be the basis for the final technical blog post.
 
 ## Week 1
 
-- [ ] Environment setup
-- [ ] Gemini API test script
-- [ ] Streamlit chat UI
+- [x] Environment setup
+- [x] Gemini API test script
+- [x] Streamlit chat UI
+- [ ] MediaPipe webcam facial/gaze analysis
+- [ ] Adaptive teaching logic integration
+
+### Log Details
+
+- **Built**:
+  - Configured Streamlit interface with chat history management and teaching style selector (Standard, Socratic, Simplified, Encouraging).
+  - Created standalone test script `test_gemini.py` for verifying Gemini API integration.
+- **What broke**:
+  - Legacy model strings (`gemini-1.5-pro`, `gemini-2.5-flash`) returned `404 NotFound` errors when querying the latest API endpoints.
+- **Fix**:
+  - Verified active available generation models on the API key and updated integration to use `gemini-3.6-flash`.
