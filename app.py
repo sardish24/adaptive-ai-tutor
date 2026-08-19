@@ -31,9 +31,9 @@ model = genai.GenerativeModel(
     system_instruction=SYSTEM_PROMPT,
 )
 
-# --- MediaPipe Tasks Face Landmarker Setup ---
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "face_landmarker.task")
-MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+# --- High-Performance Face and Landmark Detection ---
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "face_detection_yunet.onnx")
+MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 
 def ensure_model_file():
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
@@ -43,39 +43,72 @@ def ensure_model_file():
 
 ensure_model_file()
 
-from mediapipe.tasks import python as mp_python
-from mediapipe.tasks.python import vision as mp_vision
-
 class VideoTransformer(VideoTransformerBase):
     def __init__(self):
-        base_options = mp_python.BaseOptions(model_asset_path=MODEL_PATH)
-        options = mp_vision.FaceLandmarkerOptions(
-            base_options=base_options,
-            running_mode=mp_vision.RunningMode.IMAGE,
-            num_faces=1,
-            min_face_detection_confidence=0.5,
-            min_face_presence_confidence=0.5,
-            min_tracking_confidence=0.5,
-            output_face_blendshapes=False
-        )
-        self.detector = mp_vision.FaceLandmarker.create_from_options(options)
+        self.detector = None
+        self.current_size = None
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img_bgr = frame.to_ndarray(format="bgr24")
         h, w, _ = img_bgr.shape
 
-        # Convert to RGB for MediaPipe Image
-        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+        # Initialize detector with matching frame size
+        if self.detector is None or self.current_size != (w, h):
+            self.detector = cv2.FaceDetectorYN.create(
+                MODEL_PATH,
+                "",
+                (w, h),
+                score_threshold=0.6,
+                nms_threshold=0.3
+            )
+            self.current_size = (w, h)
 
-        detection_result = self.detector.detect(mp_image)
+        # Detect face and landmarks
+        _, faces = self.detector.detect(img_bgr)
 
-        # Draw facial landmarks
-        if detection_result.face_landmarks:
-            for face_landmarks in detection_result.face_landmarks:
-                for lm in face_landmarks:
-                    cx, cy = int(lm.x * w), int(lm.y * h)
-                    cv2.circle(img_bgr, (cx, cy), 1, (0, 255, 0), -1)
+        status_text = "Tracking: Searching..."
+        status_color = (0, 165, 255)  # Orange
+
+        if faces is not None and len(faces) > 0:
+            face = faces[0]
+            # Bounding box coordinates
+            box = face[0:4].astype(int)
+            x, y, bw, bh = box
+            cv2.rectangle(img_bgr, (x, y), (x + bw, y + bh), (0, 255, 128), 2)
+
+            # Key facial landmarks: right eye, left eye, nose tip, right mouth, left mouth
+            landmarks = face[4:14].reshape((5, 2)).astype(int)
+            for i, (lx, ly) in enumerate(landmarks):
+                # Draw landmark points
+                cv2.circle(img_bgr, (lx, ly), 4, (0, 255, 255), -1)
+
+            # Connect eye and mouth contour guide lines
+            cv2.line(img_bgr, tuple(landmarks[0]), tuple(landmarks[1]), (255, 200, 0), 1)
+            cv2.line(img_bgr, tuple(landmarks[3]), tuple(landmarks[4]), (255, 200, 0), 1)
+
+            # Calculate gaze / head orientation proxy
+            r_eye, l_eye, nose = landmarks[0], landmarks[1], landmarks[2]
+            eye_center_x = (r_eye[0] + l_eye[0]) / 2.0
+            horizontal_offset = (nose[0] - eye_center_x) / (bw + 1e-5)
+
+            if abs(horizontal_offset) < 0.15:
+                status_text = "Cognitive State: Engaged & Focused"
+                status_color = (0, 255, 0)
+            else:
+                status_text = "Cognitive State: Looking Away"
+                status_color = (0, 215, 255)
+
+        # Overlay status banner
+        cv2.putText(
+            img_bgr,
+            status_text,
+            (20, 35),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            status_color,
+            2,
+            cv2.LINE_AA
+        )
 
         return av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
 
