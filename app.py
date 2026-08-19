@@ -1,79 +1,57 @@
 import os
 import streamlit as st
-import google.generativeai as genai
 from dotenv import load_dotenv
+import google.generativeai as genai
 
-# Load environment variables
+# --- Setup ---
 load_dotenv()
-
 api_key = os.getenv("GEMINI_API_KEY")
 
-st.set_page_config(page_title="Adaptive AI Tutor", page_icon="🎓", layout="wide")
-st.title("Adaptive AI Tutor")
-
 if not api_key:
-    st.error("GEMINI_API_KEY is not set. Please add it to your .env file or environment variables.")
+    st.error("GEMINI_API_KEY not found. Check your .env file.")
     st.stop()
 
 genai.configure(api_key=api_key)
 
-# Sidebar settings
-with st.sidebar:
-    st.header("Tutor Settings")
-    model_choice = st.selectbox(
-        "Select Model",
-        ["gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.5-flash"],
-        index=0
-    )
-    teaching_style = st.selectbox(
-        "Teaching Mode",
-        ["Standard", "Socratic (Question-based)", "Simplified / Beginner", "Encouraging / Detailed"],
-        index=0
-    )
-    if st.button("Clear Chat"):
-        st.session_state.messages = []
-        st.rerun()
+SYSTEM_PROMPT = (
+    "You are an expert AI tutor. Explain concepts clearly and concisely. "
+    "Adapt your explanations to be genuinely helpful for a learner."
+)
 
-# Initialize chat session history
+model = genai.GenerativeModel(
+    model_name="gemini-3.6-flash",
+    system_instruction=SYSTEM_PROMPT,
+)
+
+# --- Page config ---
+st.set_page_config(page_title="Adaptive AI Tutor", layout="wide")
+st.title("Adaptive AI Tutor")
+
+# --- Session state init ---
+if "chat_session" not in st.session_state:
+    st.session_state.chat_session = model.start_chat(history=[])
+
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages = []  # for rendering in UI
 
-# System instructions based on mode
-system_prompts = {
-    "Standard": "You are a knowledgeable, patient, and adaptive AI tutor helping students understand concepts clearly.",
-    "Socratic (Question-based)": "You are a Socratic AI tutor. Guide the student by asking thoughtful questions rather than directly giving answers.",
-    "Simplified / Beginner": "You are an AI tutor explaining complex concepts with simple analogies and easy-to-understand terms.",
-    "Encouraging / Detailed": "You are a supportive, enthusiastic AI tutor providing detailed step-by-step breakdowns and encouraging feedback."
-}
-
-# Display existing chat history
+# --- Render existing chat history ---
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# User input
-if prompt := st.chat_input("Ask your tutor a question..."):
-    st.session_state.messages.append({"role": "user", "content": prompt})
+# --- Chat input ---
+user_input = st.chat_input("Ask your tutor something...")
+
+if user_input:
+    # Show user message immediately
+    st.session_state.messages.append({"role": "user", "content": user_input})
     with st.chat_message("user"):
-        st.markdown(prompt)
+        st.markdown(user_input)
 
-    # Generate response
+    # Get Gemini response
     with st.chat_message("assistant"):
-        try:
-            model = genai.GenerativeModel(
-                model_name=model_choice,
-                system_instruction=system_prompts.get(teaching_style)
-            )
-            # Format history for Gemini chat
-            chat_history = [
-                {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
-                for m in st.session_state.messages[:-1]
-            ]
-            chat = model.start_chat(history=chat_history)
-            response = chat.send_message(prompt)
+        with st.spinner("Thinking..."):
+            response = st.session_state.chat_session.send_message(user_input)
             st.markdown(response.text)
-            st.session_state.messages.append({"role": "assistant", "content": response.text})
-        except Exception as e:
-            error_message = f"Error communicating with Gemini: {e}"
-            st.error(error_message)
 
+    st.session_state.messages.append({"role": "assistant", "content": response.text})
