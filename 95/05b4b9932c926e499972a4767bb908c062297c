@@ -1,0 +1,24 @@
+.env.example
+  h_c6066df13fcc8f 1
+.gitignore
+  h_c6066df13fcc8f 1-6
+PROGRESS.md
+  h_c6066df13fcc8f 1-10
+README.md
+  h_c6066df13fcc8f 1-24
+app.py
+  h_c6066df13fcc8f 1-5
+requirements.txt
+  h_c6066df13fcc8f 1-6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "9505b4b9932c926e499972a4767bb908c062297c",
+  "prompts": {},
+  "humans": {
+    "h_c6066df13fcc8f": {
+      "author": "Kaizer-sardish <f20240563@pilani.bits-pilani.ac.in>"
+    }
+  }
+}
