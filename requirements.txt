@@ -4,4 +4,6 @@ opencv-python-headless
 streamlit-webrtc
 av
 numpy
+pypdf
+langchain-text-splitters
 python-dotenv

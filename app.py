@@ -7,6 +7,7 @@ import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+from rag_engine import RAGEngine
 
 # --- Setup ---
 load_dotenv()
@@ -32,7 +33,9 @@ class StateHolder:
         "roll_deg": 0.0,
         "mouth_aspect": 0.5
     }
-    last_update_ts = time.time()
+    distracted_start_ts: float = 0.0
+    is_distracted_sustained: bool = False
+    last_update_ts: float = time.time()
 
 # --- High-Performance Face and Landmark Detection ---
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "face_detection_yunet.onnx")
@@ -125,7 +128,20 @@ class VideoTransformer(VideoTransformerBase):
             if len(self.state_history) > self.history_len:
                 self.state_history.pop(0)
 
-            StateHolder.current_state = max(set(self.state_history), key=self.state_history.count)
+            smoothed_state = max(set(self.state_history), key=self.state_history.count)
+            now = time.time()
+
+            # Track sustained distraction (> 10s)
+            if smoothed_state == "Distracted / Looking Away":
+                if StateHolder.distracted_start_ts == 0.0:
+                    StateHolder.distracted_start_ts = now
+                elif now - StateHolder.distracted_start_ts >= 10.0:
+                    StateHolder.is_distracted_sustained = True
+            else:
+                StateHolder.distracted_start_ts = 0.0
+                StateHolder.is_distracted_sustained = False
+
+            StateHolder.current_state = smoothed_state
             StateHolder.confidence = conf
             StateHolder.last_metrics = {
                 "yaw_ratio": round(float(yaw_ratio), 2),
@@ -133,7 +149,7 @@ class VideoTransformer(VideoTransformerBase):
                 "roll_deg": round(float(roll_deg), 1),
                 "mouth_aspect": round(float(mouth_dist / eye_dist), 2)
             }
-            StateHolder.last_update_ts = time.time()
+            StateHolder.last_update_ts = now
 
         # Display Live Cognitive State Badge
         cv2.rectangle(img_bgr, (10, 10), (w - 10, 50), (20, 20, 20), -1)
@@ -152,8 +168,17 @@ class VideoTransformer(VideoTransformerBase):
 
 # --- Page Config ---
 st.set_page_config(page_title="Adaptive AI Tutor", layout="wide", page_icon="🎓")
-st.title("🎓 Adaptive AI Tutor")
-st.caption("Real-time biometric cognitive state detection feeding dynamically into an adaptive Gemini tutor.")
+st.title("🎓 Adaptive AI Tutor with RAG & Proctoring")
+st.caption("Real-time biometric cognitive state detection feeding dynamically into an adaptive, curriculum-grounded Gemini tutor.")
+
+# --- Initialize RAG Engine ---
+@st.cache_resource
+def get_rag_engine():
+    rag = RAGEngine()
+    rag.ingest_study_materials()
+    return rag
+
+rag_engine = get_rag_engine()
 
 # --- STUN Server Configuration for Cloud WebRTC ---
 RTC_CONFIGURATION = {
@@ -164,11 +189,45 @@ RTC_CONFIGURATION = {
     ]
 }
 
+# --- Sidebar: Curriculum & Proctoring Panel ---
+with st.sidebar:
+    st.header("📚 Curriculum & Study Materials")
+    st.write("Documents in `./study_materials` are vectorized for grounded tutoring.")
+    
+    study_files = os.listdir(os.path.join(os.path.dirname(__file__), "study_materials"))
+    if study_files:
+        st.markdown("**Indexed Materials:**")
+        for f in study_files:
+            st.markdown(f"- 📄 `{f}`")
+    else:
+        st.info("No study files found. Add `.pdf`, `.txt`, or `.md` files to `./study_materials`.")
+
+    if st.button("🔄 Re-Index Knowledge Base"):
+        with st.spinner("Indexing study documents..."):
+            count = rag_engine.ingest_study_materials()
+            st.success(f"Indexed {count} text chunks into local vector store.")
+
+    st.markdown("---")
+    st.header("🛡️ Live Proctoring Status")
+    if StateHolder.is_distracted_sustained:
+        st.error("🚨 **PROCTOR ALERT**: Looking away for > 10 seconds.")
+    elif StateHolder.current_state == "Drowsy / Fatigued":
+        st.warning("⚠️ **FATIGUE DETECTED**: Student appears drowsy.")
+    else:
+        st.success("✅ **Proctoring Active**: Normal engagement.")
+
+# --- Live Proctoring UI Alerts ---
+if StateHolder.is_distracted_sustained:
+    st.toast("🚨 Proctor Alert: Please lock in and focus on your study materials.", icon="⚠️")
+    st.warning("🚨 **Proctoring Notice**: Sustained distraction detected (> 10s off-screen). Please redirect your focus.", icon="⚠️")
+elif StateHolder.current_state == "Drowsy / Fatigued":
+    st.warning("⚠️ **Proctoring Notice**: Eye closure / head drooping detected. Consider taking a 1-minute stretch break.", icon="☕")
+
 # --- Two-Column Layout ---
 col_chat, col_webcam = st.columns([3, 2], gap="large")
 
 with col_webcam:
-    st.subheader("📹 Real-Time Biometric & Gaze Stream")
+    st.subheader("📹 Real-Time Biometric Stream")
     webrtc_streamer(
         key="adaptive-webcam",
         video_transformer_factory=VideoTransformer,
@@ -178,7 +237,7 @@ with col_webcam:
     )
 
     # Live Biometric Metric Display Cards
-    st.markdown("##### 🧠 Live Cognitive Telemetry")
+    st.markdown("##### 🧠 Cognitive & Proctoring Telemetry")
     m_col1, m_col2 = st.columns(2)
     with m_col1:
         st.metric("Detected State", StateHolder.current_state)
@@ -188,7 +247,7 @@ with col_webcam:
         st.metric("Gaze Yaw Ratio", f"{StateHolder.last_metrics['yaw_ratio']}")
 
 with col_chat:
-    st.subheader("💬 Adaptive Tutor Chat")
+    st.subheader("💬 Curriculum-Grounded Adaptive Chat")
 
     # Session state init
     if "messages" not in st.session_state:
@@ -198,17 +257,22 @@ with col_chat:
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            if "context" in msg and msg["context"]:
+                with st.expander("📖 Grounded Curriculum Context"):
+                    st.caption(msg["context"])
 
     # Chat input
-    user_input = st.chat_input("Ask your tutor a question...")
+    user_input = st.chat_input("Ask your tutor a question about your study material...")
 
     if user_input:
-        # Append and render user message
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # Dynamic System Instruction Injection based on live cognitive state
+        # 1. RAG Similarity Search in Curriculum Vector Store
+        retrieved_context = rag_engine.retrieve_relevant_context(user_input, top_k=2)
+
+        # 2. Dynamic System Instruction Injection based on live cognitive state + RAG Context
         current_state = StateHolder.current_state
         
         if current_state == "Confused / High Cognitive Load":
@@ -234,21 +298,29 @@ with col_chat:
                 "Deliver a comprehensive, high-quality, structured explanation with standard technical depth."
             )
 
+        rag_section = (
+            f"\n\n--- OFFICIAL CURRICULUM CONTEXT ---\n{retrieved_context}\n--- END CONTEXT ---\n"
+            "Ground your answer in the official curriculum context above when relevant. "
+            "Cite the source material if applicable."
+            if retrieved_context else
+            "\nNo direct study material context found. Answer using expert foundational knowledge."
+        )
+
         full_system_prompt = (
-            "You are an expert, empathetic, and adaptive AI tutor.\n\n"
+            "You are an expert, empathetic, and adaptive AI tutor grounded in official study materials.\n\n"
             f"LIVE STUDENT STATE: {current_state} (Confidence: {int(StateHolder.confidence)}%)\n"
-            f"ADAPTIVE PEDAGOGICAL DIRECTIVE: {adaptive_instruction}"
+            f"ADAPTIVE PEDAGOGICAL DIRECTIVE: {adaptive_instruction}\n"
+            f"{rag_section}"
         )
 
         with st.chat_message("assistant"):
-            with st.spinner(f"Adapting explanation to your state ({current_state})..."):
+            with st.spinner(f"Retrieving curriculum & adapting to state ({current_state})..."):
                 try:
                     adaptive_model = genai.GenerativeModel(
                         model_name="gemini-3.6-flash",
                         system_instruction=full_system_prompt
                     )
                     
-                    # Prepare history for Gemini
                     chat_history = [
                         {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
                         for m in st.session_state.messages[:-1]
@@ -256,6 +328,15 @@ with col_chat:
                     chat = adaptive_model.start_chat(history=chat_history)
                     response = chat.send_message(user_input)
                     st.markdown(response.text)
-                    st.session_state.messages.append({"role": "assistant", "content": response.text})
+                    
+                    if retrieved_context:
+                        with st.expander("📖 Grounded Curriculum Context"):
+                            st.caption(retrieved_context)
+
+                    st.session_state.messages.append({
+                        "role": "assistant",
+                        "content": response.text,
+                        "context": retrieved_context
+                    })
                 except Exception as e:
                     st.error(f"Error communicating with Gemini: {e}")
