@@ -1,7 +1,7 @@
 streamlit
 google-generativeai
 opencv-python-headless
-mediapipe
 streamlit-webrtc
 av
+numpy
 python-dotenv
