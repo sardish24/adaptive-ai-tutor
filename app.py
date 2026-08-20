@@ -46,114 +46,92 @@ def ensure_model_file():
 
 ensure_model_file()
 
+def classify_cognitive_state(pitch_ratio: float, yaw_ratio: float, roll_deg: float, face_score: float):
+    """Classifies facial orientation metrics into a cognitive state, confidence, and color."""
+    if pitch_ratio > 0.85:
+        state = "Drowsy / Fatigued"
+        conf = min(98.0, 75.0 + (pitch_ratio - 0.85) * 50)
+        color = (0, 0, 255)  # Red
+    elif abs(yaw_ratio) > 0.28:
+        state = "Distracted / Looking Away"
+        conf = min(95.0, 70.0 + abs(yaw_ratio) * 60)
+        color = (0, 165, 255)  # Orange
+    elif abs(roll_deg) > 11.0 or (0.28 <= pitch_ratio <= 0.40):
+        state = "Confused / High Cognitive Load"
+        conf = min(92.0, 68.0 + abs(roll_deg) * 2.0)
+        color = (0, 255, 255)  # Yellow
+    else:
+        state = "Focused / Attentive"
+        conf = max(80.0, face_score * 100)
+        color = (0, 255, 0)  # Green
+    return state, conf, color
+
+def draw_face_annotations(img_bgr, box, landmarks):
+    """Draws bounding box, facial landmark dots, and connection lines."""
+    x, y, bw, bh = box
+    cv2.rectangle(img_bgr, (x, y), (x + bw, y + bh), (0, 255, 128), 2)
+    for pt in landmarks:
+        cv2.circle(img_bgr, (int(pt[0]), int(pt[1])), 4, (0, 255, 255), -1)
+    # Contour guide lines
+    cv2.line(img_bgr, (int(landmarks[0][0]), int(landmarks[0][1])), (int(landmarks[1][0]), int(landmarks[1][1])), (255, 200, 0), 1)
+    cv2.line(img_bgr, (int(landmarks[3][0]), int(landmarks[3][1])), (int(landmarks[4][0]), int(landmarks[4][1])), (255, 200, 0), 1)
+
 class VideoTransformer(VideoTransformerBase):
     def __init__(self):
         self.detector = None
         self.current_size = None
-        # State tracking buffers for temporal smoothing
         self.state_history = []
         self.history_len = 15
+
+    def _get_detector(self, w: int, h: int):
+        if self.detector is None or self.current_size != (w, h):
+            self.detector = cv2.FaceDetectorYN.create(
+                MODEL_PATH, "", (w, h), score_threshold=0.6, nms_threshold=0.3
+            )
+            self.current_size = (w, h)
+        return self.detector
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img_bgr = frame.to_ndarray(format="bgr24")
         h, w, _ = img_bgr.shape
+        detector = self._get_detector(w, h)
 
-        # Initialize detector with matching frame size
-        if self.detector is None or self.current_size != (w, h):
-            self.detector = cv2.FaceDetectorYN.create(
-                MODEL_PATH,
-                "",
-                (w, h),
-                score_threshold=0.6,
-                nms_threshold=0.3
-            )
-            self.current_size = (w, h)
-
-        # Detect face and 5 key landmarks (right eye, left eye, nose, right mouth, left mouth)
-        _, faces = self.detector.detect(img_bgr)
-
-        detected_state = "Searching for Face..."
-        conf = 0.0
+        _, faces = detector.detect(img_bgr)
         status_color = (128, 128, 128)
 
         if faces is not None and len(faces) > 0:
             face = faces[0]
             box = face[0:4].astype(int)
-            x, y, bw, bh = box
-            
-            # Confidence score of face detection
             face_score = float(face[14]) if len(face) > 14 else 0.9
-
-            # Landmarks: [0: r_eye, 1: l_eye, 2: nose, 3: r_mouth, 4: l_mouth]
             landmarks = face[4:14].reshape((5, 2)).astype(float)
+
+            draw_face_annotations(img_bgr, box, landmarks)
+
             r_eye, l_eye, nose, r_mouth, l_mouth = landmarks
-
-            # Draw bounding box
-            cv2.rectangle(img_bgr, (x, y), (x + bw, y + bh), (0, 255, 128), 2)
-
-            # Draw landmarks
-            for pt in landmarks:
-                cv2.circle(img_bgr, (int(pt[0]), int(pt[1])), 4, (0, 255, 255), -1)
-
-            # Contour guide lines
-            cv2.line(img_bgr, (int(r_eye[0]), int(r_eye[1])), (int(l_eye[0]), int(l_eye[1])), (255, 200, 0), 1)
-            cv2.line(img_bgr, (int(r_mouth[0]), int(r_mouth[1])), (int(l_mouth[0]), int(l_mouth[1])), (255, 200, 0), 1)
-
-            # --- Biometric Computations ---
-            # 1. Inter-ocular distance (eye span)
             eye_dist = np.linalg.norm(l_eye - r_eye) + 1e-5
             eye_center = (r_eye + l_eye) / 2.0
 
-            # 2. Horizontal yaw ratio (looking left / right)
             yaw_ratio = (nose[0] - eye_center[0]) / eye_dist
-
-            # 3. Vertical pitch ratio (head drooping down / looking up)
             pitch_ratio = (nose[1] - eye_center[1]) / eye_dist
-
-            # 4. Head roll angle in degrees (head tilt)
             roll_deg = float(np.degrees(np.arctan2(l_eye[1] - r_eye[1], l_eye[0] - r_eye[0])))
-
-            # 5. Mouth width ratio
             mouth_dist = np.linalg.norm(l_mouth - r_mouth)
-            mouth_aspect = mouth_dist / eye_dist
 
-            # --- Multi-Metric Cognitive State Classification ---
-            if pitch_ratio > 0.85:
-                # Head drooped down significantly
-                detected_state = "Drowsy / Fatigued"
-                conf = min(98.0, 75.0 + (pitch_ratio - 0.85) * 50)
-                status_color = (0, 0, 255)  # Red
-            elif abs(yaw_ratio) > 0.28:
-                # Sustained off-center gaze
-                detected_state = "Distracted / Looking Away"
-                conf = min(95.0, 70.0 + abs(yaw_ratio) * 60)
-                status_color = (0, 165, 255)  # Orange
-            elif abs(roll_deg) > 11.0 or (0.28 <= pitch_ratio <= 0.40):
-                # Head tilted sideways or brow lowered with squint/tension
-                detected_state = "Confused / High Cognitive Load"
-                conf = min(92.0, 68.0 + abs(roll_deg) * 2.0)
-                status_color = (0, 255, 255)  # Yellow
-            else:
-                # Balanced forward orientation
-                detected_state = "Focused / Attentive"
-                conf = max(80.0, face_score * 100)
-                status_color = (0, 255, 0)  # Green
+            detected_state, conf, status_color = classify_cognitive_state(
+                pitch_ratio, yaw_ratio, roll_deg, face_score
+            )
 
             # Temporal smoothing over buffer
             self.state_history.append(detected_state)
             if len(self.state_history) > self.history_len:
                 self.state_history.pop(0)
 
-            # Majority voting for stable state transitions
-            smoothed_state = max(set(self.state_history), key=self.state_history.count)
-
-            StateHolder.current_state = smoothed_state
+            StateHolder.current_state = max(set(self.state_history), key=self.state_history.count)
             StateHolder.confidence = conf
             StateHolder.last_metrics = {
                 "yaw_ratio": round(float(yaw_ratio), 2),
                 "pitch_ratio": round(float(pitch_ratio), 2),
                 "roll_deg": round(float(roll_deg), 1),
-                "mouth_aspect": round(float(mouth_aspect), 2)
+                "mouth_aspect": round(float(mouth_dist / eye_dist), 2)
             }
             StateHolder.last_update_ts = time.time()
 
