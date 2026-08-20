@@ -9,7 +9,8 @@ This will be the basis for the final technical blog post.
 - [x] Gemini API test script
 - [x] Streamlit chat UI
 - [x] MediaPipe webcam facial/gaze analysis (WebRTC Streamer)
-- [ ] Adaptive teaching logic integration
+- [x] Multi-metric cognitive state detection (4 states: Focused, Confused, Distracted, Drowsy)
+- [x] Adaptive Gemini feedback loop (dynamic system prompt injection)
 
 ### Log Details
 
