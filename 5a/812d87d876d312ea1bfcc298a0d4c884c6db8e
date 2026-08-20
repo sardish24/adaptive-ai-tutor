@@ -1,0 +1,22 @@
+PROGRESS.md
+  h_c6066df13fcc8f 14-15,23-25
+app.py
+  h_c6066df13fcc8f 10,36-38,131-144,152,171-181,192-225,230,240,250,260-262,265,272-275,301-308,310,312-313,317,331-340
+rag_engine.py
+  h_c6066df13fcc8f 1-136
+requirements.txt
+  h_c6066df13fcc8f 7-8
+study_materials/linear_regression.md
+  h_c6066df13fcc8f 1-26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "5a812d87d876d312ea1bfcc298a0d4c884c6db8e",
+  "prompts": {},
+  "humans": {
+    "h_c6066df13fcc8f": {
+      "author": "Kaizer-sardish <f20240563@pilani.bits-pilani.ac.in>"
+    }
+  }
+}
