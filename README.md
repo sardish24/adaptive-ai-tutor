@@ -19,7 +19,7 @@
 
 ## 🏛️ System Architecture
 
-```
+```text
                                   +---------------------------------------+
                                   |            Client Browser             |
                                   |  (Webcam Feed + Streamlit Chat UI)    |
