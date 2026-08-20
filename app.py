@@ -177,6 +177,15 @@ st.set_page_config(page_title="Adaptive AI Tutor", layout="wide", page_icon="ðŸŽ
 st.title("ðŸŽ“ Adaptive AI Tutor")
 st.caption("Real-time biometric cognitive state detection feeding dynamically into an adaptive Gemini tutor.")
 
+# --- STUN Server Configuration for Cloud WebRTC ---
+RTC_CONFIGURATION = {
+    "iceServers": [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+    ]
+}
+
 # --- Two-Column Layout ---
 col_chat, col_webcam = st.columns([3, 2], gap="large")
 
@@ -185,6 +194,7 @@ with col_webcam:
     webrtc_streamer(
         key="adaptive-webcam",
         video_transformer_factory=VideoTransformer,
+        rtc_configuration=RTC_CONFIGURATION,
         media_stream_constraints={"video": True, "audio": False},
         async_processing=True,
     )
