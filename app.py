@@ -1,9 +1,8 @@
 import os
 import time
-import math
-import numpy as np
 import av
 import cv2
+import numpy as np
 import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -23,20 +22,17 @@ if not api_key:
 
 genai.configure(api_key=api_key)
 
-# Global shared state container across WebRTC worker thread and Streamlit script runner
-class SharedMetrics:
-    def __init__(self):
-        self.state = "Focused / Attentive"
-        self.confidence = 0.95
-        self.pitch = 0.0
-        self.yaw = 0.0
-        self.roll = 0.0
-        self.last_updated = time.time()
-
-if "shared_metrics" not in st.session_state:
-    st.session_state.shared_metrics = SharedMetrics()
-
-shared_metrics = st.session_state.shared_metrics
+# Global shared state container for WebRTC thread -> Streamlit UI communication
+class StateHolder:
+    current_state = "Focused / Attentive"
+    confidence = 90.0
+    last_metrics = {
+        "yaw_ratio": 0.0,
+        "pitch_ratio": 0.5,
+        "roll_deg": 0.0,
+        "mouth_aspect": 0.5
+    }
+    last_update_ts = time.time()
 
 # --- High-Performance Face and Landmark Detection ---
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "face_detection_yunet.onnx")
@@ -54,19 +50,13 @@ class VideoTransformer(VideoTransformerBase):
     def __init__(self):
         self.detector = None
         self.current_size = None
-        # Smoothing filters & timers
-        self.smooth_yaw = 0.0
-        self.smooth_pitch = 0.0
-        self.smooth_roll = 0.0
-        self.confused_start_time = None
-        self.distracted_start_time = None
-        self.drowsy_start_time = None
-        self.current_state = "Focused / Attentive"
+        # State tracking buffers for temporal smoothing
+        self.state_history = []
+        self.history_len = 15
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img_bgr = frame.to_ndarray(format="bgr24")
         h, w, _ = img_bgr.shape
-        now = time.time()
 
         # Initialize detector with matching frame size
         if self.detector is None or self.current_size != (w, h):
@@ -79,121 +69,100 @@ class VideoTransformer(VideoTransformerBase):
             )
             self.current_size = (w, h)
 
-        # Detect face and landmarks
+        # Detect face and 5 key landmarks (right eye, left eye, nose, right mouth, left mouth)
         _, faces = self.detector.detect(img_bgr)
 
-        status_text = "Tracking: Searching..."
-        status_color = (0, 165, 255)
+        detected_state = "Searching for Face..."
+        conf = 0.0
+        status_color = (128, 128, 128)
 
         if faces is not None and len(faces) > 0:
             face = faces[0]
             box = face[0:4].astype(int)
             x, y, bw, bh = box
+            
+            # Confidence score of face detection
+            face_score = float(face[14]) if len(face) > 14 else 0.9
 
-            # Bounding box
-            cv2.rectangle(img_bgr, (x, y), (x + bw, y + bh), (0, 255, 128), 2)
-
-            # Key facial landmarks: right eye, left eye, nose tip, right mouth, left mouth
+            # Landmarks: [0: r_eye, 1: l_eye, 2: nose, 3: r_mouth, 4: l_mouth]
             landmarks = face[4:14].reshape((5, 2)).astype(float)
             r_eye, l_eye, nose, r_mouth, l_mouth = landmarks
 
+            # Draw bounding box
+            cv2.rectangle(img_bgr, (x, y), (x + bw, y + bh), (0, 255, 128), 2)
+
             # Draw landmarks
-            for lx, ly in landmarks.astype(int):
-                cv2.circle(img_bgr, (lx, ly), 4, (0, 255, 255), -1)
+            for pt in landmarks:
+                cv2.circle(img_bgr, (int(pt[0]), int(pt[1])), 4, (0, 255, 255), -1)
 
-            cv2.line(img_bgr, tuple(landmarks[0].astype(int)), tuple(landmarks[1].astype(int)), (255, 200, 0), 1)
-            cv2.line(img_bgr, tuple(landmarks[3].astype(int)), tuple(landmarks[4].astype(int)), (255, 200, 0), 1)
+            # Contour guide lines
+            cv2.line(img_bgr, (int(r_eye[0]), int(r_eye[1])), (int(l_eye[0]), int(l_eye[1])), (255, 200, 0), 1)
+            cv2.line(img_bgr, (int(r_mouth[0]), int(r_mouth[1])), (int(l_mouth[0]), int(l_mouth[1])), (255, 200, 0), 1)
 
-            # 1. Roll angle (Head Tilt) from eye slope
-            dx = l_eye[0] - r_eye[0]
-            dy = l_eye[1] - r_eye[1]
-            raw_roll = math.degrees(math.atan2(dy, dx + 1e-5))
+            # --- Biometric Computations ---
+            # 1. Inter-ocular distance (eye span)
+            eye_dist = np.linalg.norm(l_eye - r_eye) + 1e-5
+            eye_center = (r_eye + l_eye) / 2.0
 
-            # 2. Yaw angle (Looking left/right) from nose position relative to eye mid-point
-            eye_mid_x = (r_eye[0] + l_eye[0]) / 2.0
-            eye_dist = math.hypot(dx, dy) + 1e-5
-            raw_yaw = ((nose[0] - eye_mid_x) / eye_dist) * 60.0
+            # 2. Horizontal yaw ratio (looking left / right)
+            yaw_ratio = (nose[0] - eye_center[0]) / eye_dist
 
-            # 3. Pitch angle (Nodding / Looking up/down)
-            eye_mid_y = (r_eye[1] + l_eye[1]) / 2.0
-            mouth_mid_y = (r_mouth[1] + l_mouth[1]) / 2.0
-            face_height_proxy = mouth_mid_y - eye_mid_y + 1e-5
-            nose_vert_ratio = (nose[1] - eye_mid_y) / face_height_proxy
-            raw_pitch = (nose_vert_ratio - 0.55) * 80.0
+            # 3. Vertical pitch ratio (head drooping down / looking up)
+            pitch_ratio = (nose[1] - eye_center[1]) / eye_dist
 
-            # Apply Exponential Smoothing (alpha = 0.25)
-            alpha = 0.25
-            self.smooth_roll = alpha * raw_roll + (1 - alpha) * self.smooth_roll
-            self.smooth_yaw = alpha * raw_yaw + (1 - alpha) * self.smooth_yaw
-            self.smooth_pitch = alpha * raw_pitch + (1 - alpha) * self.smooth_pitch
+            # 4. Head roll angle in degrees (head tilt)
+            roll_deg = float(np.degrees(np.arctan2(l_eye[1] - r_eye[1], l_eye[0] - r_eye[0])))
 
-            # 4. Multi-metric State Machine Evaluation
-            is_distracted = abs(self.smooth_yaw) > 22.0 or abs(self.smooth_pitch) > 25.0
-            is_tilted = abs(self.smooth_roll) > 13.0
-            is_drooping = self.smooth_pitch > 20.0 and abs(self.smooth_yaw) < 10.0
+            # 5. Mouth width ratio
+            mouth_dist = np.linalg.norm(l_mouth - r_mouth)
+            mouth_aspect = mouth_dist / eye_dist
 
-            # Temporal persistence thresholds (prevent rapid flickering)
-            if is_distracted:
-                if self.distracted_start_time is None:
-                    self.distracted_start_time = now
-                if now - self.distracted_start_time > 1.5:
-                    self.current_state = "Distracted / Looking Away"
+            # --- Multi-Metric Cognitive State Classification ---
+            if pitch_ratio > 0.85:
+                # Head drooped down significantly
+                detected_state = "Drowsy / Fatigued"
+                conf = min(98.0, 75.0 + (pitch_ratio - 0.85) * 50)
+                status_color = (0, 0, 255)  # Red
+            elif abs(yaw_ratio) > 0.28:
+                # Sustained off-center gaze
+                detected_state = "Distracted / Looking Away"
+                conf = min(95.0, 70.0 + abs(yaw_ratio) * 60)
+                status_color = (0, 165, 255)  # Orange
+            elif abs(roll_deg) > 11.0 or (0.28 <= pitch_ratio <= 0.40):
+                # Head tilted sideways or brow lowered with squint/tension
+                detected_state = "Confused / High Cognitive Load"
+                conf = min(92.0, 68.0 + abs(roll_deg) * 2.0)
+                status_color = (0, 255, 255)  # Yellow
             else:
-                self.distracted_start_time = None
+                # Balanced forward orientation
+                detected_state = "Focused / Attentive"
+                conf = max(80.0, face_score * 100)
+                status_color = (0, 255, 0)  # Green
 
-            if is_drooping:
-                if self.drowsy_start_time is None:
-                    self.drowsy_start_time = now
-                if now - self.drowsy_start_time > 2.0:
-                    self.current_state = "Drowsy / Fatigued"
-            else:
-                self.drowsy_start_time = None
+            # Temporal smoothing over buffer
+            self.state_history.append(detected_state)
+            if len(self.state_history) > self.history_len:
+                self.state_history.pop(0)
 
-            if is_tilted and not is_distracted and not is_drooping:
-                if self.confused_start_time is None:
-                    self.confused_start_time = now
-                if now - self.confused_start_time > 1.2:
-                    self.current_state = "Confused / Struggling"
-            else:
-                self.confused_start_time = None
+            # Majority voting for stable state transitions
+            smoothed_state = max(set(self.state_history), key=self.state_history.count)
 
-            if not is_distracted and not is_tilted and not is_drooping:
-                self.current_state = "Focused / Attentive"
-
-            # Update shared metrics
-            shared_metrics.state = self.current_state
-            shared_metrics.yaw = round(self.smooth_yaw, 1)
-            shared_metrics.pitch = round(self.smooth_pitch, 1)
-            shared_metrics.roll = round(self.smooth_roll, 1)
-            shared_metrics.last_updated = now
-
-            # Visual cues styling
-            state_styles = {
-                "Focused / Attentive": ((0, 255, 0), "Focused & Attentive"),
-                "Confused / Struggling": ((0, 215, 255), "Confused (High Cognitive Load)"),
-                "Distracted / Looking Away": ((0, 140, 255), "Distracted / Looking Away"),
-                "Drowsy / Fatigued": ((0, 69, 255), "Drowsy / Low Energy")
+            StateHolder.current_state = smoothed_state
+            StateHolder.confidence = conf
+            StateHolder.last_metrics = {
+                "yaw_ratio": round(float(yaw_ratio), 2),
+                "pitch_ratio": round(float(pitch_ratio), 2),
+                "roll_deg": round(float(roll_deg), 1),
+                "mouth_aspect": round(float(mouth_aspect), 2)
             }
-            status_color, label = state_styles.get(self.current_state, ((0, 255, 0), self.current_state))
-            status_text = f"Cognitive State: {label}"
+            StateHolder.last_update_ts = time.time()
 
-            # Display orientation metrics HUD
-            cv2.putText(
-                img_bgr,
-                f"Yaw: {self.smooth_yaw:.0f}deg | Pitch: {self.smooth_pitch:.0f}deg | Tilt: {self.smooth_roll:.0f}deg",
-                (20, h - 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                (220, 220, 220),
-                1,
-                cv2.LINE_AA
-            )
-
-        # Overlay status banner
+        # Display Live Cognitive State Badge
+        cv2.rectangle(img_bgr, (10, 10), (w - 10, 50), (20, 20, 20), -1)
         cv2.putText(
             img_bgr,
-            status_text,
-            (20, 35),
+            f"State: {StateHolder.current_state} ({int(StateHolder.confidence)}%)",
+            (20, 38),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.65,
             status_color,
@@ -205,13 +174,14 @@ class VideoTransformer(VideoTransformerBase):
 
 # --- Page Config ---
 st.set_page_config(page_title="Adaptive AI Tutor", layout="wide", page_icon="🎓")
-st.title("Adaptive AI Tutor")
+st.title("🎓 Adaptive AI Tutor")
+st.caption("Real-time biometric cognitive state detection feeding dynamically into an adaptive Gemini tutor.")
 
 # --- Two-Column Layout ---
-col_chat, col_webcam = st.columns([3, 2], gap="medium")
+col_chat, col_webcam = st.columns([3, 2], gap="large")
 
 with col_webcam:
-    st.subheader("Live Cognitive State Stream")
+    st.subheader("📹 Real-Time Biometric & Gaze Stream")
     webrtc_streamer(
         key="adaptive-webcam",
         video_transformer_factory=VideoTransformer,
@@ -219,26 +189,20 @@ with col_webcam:
         async_processing=True,
     )
 
-    # State HUD Card
-    st.markdown("### Real-Time Cognitive Telemetry")
-    current_state_badge = shared_metrics.state
-    badge_colors = {
-        "Focused / Attentive": "🟢 **Focused / Attentive** (Optimal learning state)",
-        "Confused / Struggling": "🟡 **Confused / Struggling** (Adaptive explanation triggered)",
-        "Distracted / Looking Away": "🟠 **Distracted / Looking Away** (Attention re-engagement prompt)",
-        "Drowsy / Fatigued": "🔴 **Drowsy / Fatigued** (Bite-sized pacing recommendation)"
-    }
-    st.info(badge_colors.get(current_state_badge, current_state_badge))
-
-    with st.expander("Telemetry Details & Angles", expanded=False):
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Yaw (Horizontal)", f"{shared_metrics.yaw}°")
-        c2.metric("Pitch (Vertical)", f"{shared_metrics.pitch}°")
-        c3.metric("Roll (Head Tilt)", f"{shared_metrics.roll}°")
+    # Live Biometric Metric Display Cards
+    st.markdown("##### 🧠 Live Cognitive Telemetry")
+    m_col1, m_col2 = st.columns(2)
+    with m_col1:
+        st.metric("Detected State", StateHolder.current_state)
+        st.metric("Head Roll (Tilt)", f"{StateHolder.last_metrics['roll_deg']}°")
+    with m_col2:
+        st.metric("Confidence", f"{int(StateHolder.confidence)}%")
+        st.metric("Gaze Yaw Ratio", f"{StateHolder.last_metrics['yaw_ratio']}")
 
 with col_chat:
-    st.subheader("Tutor Chat")
+    st.subheader("💬 Adaptive Tutor Chat")
 
+    # Session state init
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
@@ -248,59 +212,62 @@ with col_chat:
             st.markdown(msg["content"])
 
     # Chat input
-    user_input = st.chat_input("Ask your tutor something...")
+    user_input = st.chat_input("Ask your tutor a question...")
 
     if user_input:
-        detected_state = shared_metrics.state
+        # Append and render user message
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # Dynamic System Instruction based on Real-Time Cognitive State
-        adaptive_guidance = ""
-        if detected_state == "Confused / Struggling":
-            adaptive_guidance = (
-                "\n[COGNITIVE STATE TRIGGER: The student's facial analysis indicates confusion or struggle with the concept. "
-                "Use a vivid real-world analogy, break the explanation into numbered bite-sized steps, and invite them to ask for clarification on any specific part.]"
+        # Dynamic System Instruction Injection based on live cognitive state
+        current_state = StateHolder.current_state
+        
+        if current_state == "Confused / High Cognitive Load":
+            adaptive_instruction = (
+                "The student's webcam biometric analysis indicates they are CONFUSED or experiencing high cognitive load. "
+                "Break down the answer using intuitive real-world analogies, simpler vocabulary, and step-by-step clarity. "
+                "Conclude with a brief check-in question to verify their understanding."
             )
-        elif detected_state == "Distracted / Looking Away":
-            adaptive_guidance = (
-                "\n[COGNITIVE STATE TRIGGER: The student appears distracted or looking away. "
-                "Keep the explanation punchy, concise, and end with an engaging direct question to check their understanding.]"
+        elif current_state == "Distracted / Looking Away":
+            adaptive_instruction = (
+                "The student's biometric stream indicates they are DISTRACTED or looking away. "
+                "Keep the explanation punchy, engaging, and concise (under 3 paragraphs). "
+                "End with an interactive quick question to pull their attention back."
             )
-        elif detected_state == "Drowsy / Fatigued":
-            adaptive_guidance = (
-                "\n[COGNITIVE STATE TRIGGER: The student shows signs of fatigue. "
-                "Provide a very brief summary and suggest a quick 1-minute reset or interactive quiz.]"
+        elif current_state == "Drowsy / Fatigued":
+            adaptive_instruction = (
+                "The student appears DROWSY or fatigued. "
+                "Give a very concise, direct summary in bullet points and suggest a quick 1-minute stretch or interactive quiz."
             )
         else:
-            adaptive_guidance = (
-                "\n[COGNITIVE STATE TRIGGER: The student is focused and attentive. Provide clear, structured, and deep conceptual explanation.]"
+            adaptive_instruction = (
+                "The student is FOCUSED and engaged. "
+                "Deliver a comprehensive, high-quality, structured explanation with standard technical depth."
             )
 
-        dynamic_system_prompt = (
-            "You are an expert, empathetic AI tutor helping students master concepts."
-            + adaptive_guidance
+        full_system_prompt = (
+            "You are an expert, empathetic, and adaptive AI tutor.\n\n"
+            f"LIVE STUDENT STATE: {current_state} (Confidence: {int(StateHolder.confidence)}%)\n"
+            f"ADAPTIVE PEDAGOGICAL DIRECTIVE: {adaptive_instruction}"
         )
 
         with st.chat_message("assistant"):
-            with st.spinner("Thinking..."):
+            with st.spinner(f"Adapting explanation to your state ({current_state})..."):
                 try:
-                    active_model = genai.GenerativeModel(
+                    adaptive_model = genai.GenerativeModel(
                         model_name="gemini-3.6-flash",
-                        system_instruction=dynamic_system_prompt
+                        system_instruction=full_system_prompt
                     )
-                    # Convert history to format accepted by Gemini chat
-                    gemini_history = [
+                    
+                    # Prepare history for Gemini
+                    chat_history = [
                         {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
                         for m in st.session_state.messages[:-1]
                     ]
-                    chat = active_model.start_chat(history=gemini_history)
+                    chat = adaptive_model.start_chat(history=chat_history)
                     response = chat.send_message(user_input)
                     st.markdown(response.text)
                     st.session_state.messages.append({"role": "assistant", "content": response.text})
                 except Exception as e:
-                    error_msg = f"Error generating response: {e}"
-                    st.error(error_msg)
-                    st.session_state.messages.append({"role": "assistant", "content": error_msg})
-
+                    st.error(f"Error communicating with Gemini: {e}")
