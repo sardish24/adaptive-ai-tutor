@@ -1,0 +1,12 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "ad88f83dd851fe61658de460721491a29831da9e",
+  "prompts": {},
+  "humans": {
+    "h_c6066df13fcc8f": {
+      "author": "Kaizer-sardish <f20240563@pilani.bits-pilani.ac.in>"
+    }
+  }
+}
