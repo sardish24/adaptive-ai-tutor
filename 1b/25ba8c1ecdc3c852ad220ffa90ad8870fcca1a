@@ -1,0 +1,16 @@
+packages.txt
+  h_c6066df13fcc8f 1-2
+requirements.txt
+  h_c6066df13fcc8f 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "1b25ba8c1ecdc3c852ad220ffa90ad8870fcca1a",
+  "prompts": {},
+  "humans": {
+    "h_c6066df13fcc8f": {
+      "author": "Kaizer-sardish <f20240563@pilani.bits-pilani.ac.in>"
+    }
+  }
+}
