@@ -1,0 +1,14 @@
+os_tracker.py
+  h_c6066df13fcc8f 16-30,49-63,65-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "88aea2ade32b75c5370625b7a2ebb42742bc42a4",
+  "prompts": {},
+  "humans": {
+    "h_c6066df13fcc8f": {
+      "author": "Kaizer-sardish <f20240563@pilani.bits-pilani.ac.in>"
+    }
+  }
+}
