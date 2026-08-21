@@ -1,13 +1,22 @@
 """
 Module for background tracking of operating system active windows using pygetwindow.
 Monitors browser window titles and dispatches YouTube video detection events to a thread-safe queue.
+Gracefully handles platforms without window server support (such as Linux cloud containers).
 """
 
 import time
 import threading
 import queue
 from typing import Optional, Dict, Any
-import pygetwindow as gw
+
+# Safe import for pygetwindow (avoids NotImplementedError on Linux cloud containers)
+try:
+    import pygetwindow as gw
+    HAS_PYGETWINDOW = True
+except Exception:
+    gw = None
+    HAS_PYGETWINDOW = False
+
 from youtube_engine import extract_video_id_from_text
 
 # Global thread-safe queue for UI event ingestion
@@ -43,8 +52,9 @@ class OSWindowTracker:
         self.interval_sec = interval_sec
         self.is_running = False
         self._thread: Optional[threading.Thread] = None
-        self.last_detected_title = ""
+        self.last_detected_title = "Active (Desktop)" if HAS_PYGETWINDOW else "Cloud Environment (Desktop Tracking Inactive)"
         self.last_checked_key = ""
+        self.is_supported = HAS_PYGETWINDOW
 
     def _enqueue_event(self, payload: Dict[str, Any]) -> None:
         """Pushes an event payload into the thread-safe queue."""
@@ -74,6 +84,9 @@ class OSWindowTracker:
 
     def _check_active_window(self) -> None:
         """Polls the OS for the active window and triggers processing."""
+        if not HAS_PYGETWINDOW or gw is None:
+            return
+
         try:
             active_window = gw.getActiveWindow()
             if not active_window or not active_window.title:
@@ -94,7 +107,10 @@ class OSWindowTracker:
             time.sleep(self.interval_sec)
 
     def start(self) -> None:
-        """Starts background tracking thread."""
+        """Starts background tracking thread if supported on the current platform."""
+        if not HAS_PYGETWINDOW:
+            return
+
         if not self.is_running:
             self.is_running = True
             self._thread = threading.Thread(target=self._track_loop, daemon=True)
