@@ -1,0 +1,16 @@
+app.py
+  h_c6066df13fcc8f 177
+rag_engine.py
+  h_c6066df13fcc8f 36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "d6339a88cf09734a40bfed8ef56282126f206adc",
+  "prompts": {},
+  "humans": {
+    "h_c6066df13fcc8f": {
+      "author": "Kaizer-sardish <f20240563@pilani.bits-pilani.ac.in>"
+    }
+  }
+}
