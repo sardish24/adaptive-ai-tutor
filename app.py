@@ -15,7 +15,7 @@ import plotly.express as px
 import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 
 from constants import (
     STATE_FOCUSED,
@@ -118,7 +118,7 @@ def draw_face_annotations(img_bgr: np.ndarray, box: np.ndarray, landmarks: np.nd
     cv2.line(img_bgr, (int(landmarks[0][0]), int(landmarks[0][1])), (int(landmarks[1][0]), int(landmarks[1][1])), (255, 200, 0), 1)
     cv2.line(img_bgr, (int(landmarks[3][0]), int(landmarks[3][1])), (int(landmarks[4][0]), int(landmarks[4][1])), (255, 200, 0), 1)
 
-class VideoTransformer(VideoTransformerBase):
+class VideoTransformer(VideoProcessorBase):
     """
     Processes WebRTC incoming video frames, extracts pose and landmark features,
     executes anti-spoofing liveness checks, computes optical flow XAI heatmaps,
@@ -433,7 +433,8 @@ with tab_chat:
         st.subheader("Real-Time Biometric Stream")
         webrtc_streamer(
             key="adaptive-webcam",
-            video_transformer_factory=VideoTransformer,
+            mode=WebRtcMode.SENDRECV,
+            video_processor_factory=VideoTransformer,
             rtc_configuration=RTC_CONFIGURATION,
             media_stream_constraints={"video": True, "audio": False},
             async_processing=True,
