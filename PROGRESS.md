@@ -20,6 +20,7 @@ This will be the basis for the final technical blog post.
 - [x] Phase 3 Implementation: Biometric anti-spoofing liveness detection (EAR variance micro-movement tracking in `VideoTransformer`)
 - [x] Phase 3 Implementation: SQLite session telemetry logging (`analytics_engine.py` / `session_telemetry.db`)
 - [x] Phase 3 Implementation: Plotly time-series engagement dashboard in dedicated Streamlit tab
+- [x] Phase 4 / Track 1 Implementation: Explainable AI (XAI) Motion-Magnitude Heatmap via Farneback Dense Optical Flow (`cv2.calcOpticalFlowFarneback`) with UI toggle
 
 ### Log Details
 

@@ -56,6 +56,7 @@ class StateHolder:
     distracted_start_ts: float = 0.0
     is_distracted_sustained: bool = False
     is_spoof_detected: bool = False
+    enable_xai_heatmap: bool = False
     last_update_ts: float = time.time()
 
 # Initialize background services
@@ -120,7 +121,8 @@ def draw_face_annotations(img_bgr: np.ndarray, box: np.ndarray, landmarks: np.nd
 class VideoTransformer(VideoTransformerBase):
     """
     Processes WebRTC incoming video frames, extracts pose and landmark features,
-    executes anti-spoofing liveness checks, and determines cognitive states.
+    executes anti-spoofing liveness checks, computes optical flow XAI heatmaps,
+    and determines cognitive states.
     """
 
     def __init__(self):
@@ -134,6 +136,9 @@ class VideoTransformer(VideoTransformerBase):
         self.liveness_window_sec: float = 60.0
         self.min_samples_for_liveness: int = 150
 
+        # Optical Flow XAI tracking
+        self.prev_gray: Optional[np.ndarray] = None
+
     def _get_detector(self, width: int, height: int):
         if self.detector is None or self.current_size != (width, height):
             self.detector = cv2.FaceDetectorYN.create(
@@ -141,6 +146,31 @@ class VideoTransformer(VideoTransformerBase):
             )
             self.current_size = (width, height)
         return self.detector
+
+    def _apply_optical_flow_xai(self, img_bgr: np.ndarray, gray: np.ndarray) -> np.ndarray:
+        """Calculates Farneback dense optical flow and overlays a motion magnitude heatmap."""
+        if self.prev_gray is None or self.prev_gray.shape != gray.shape:
+            self.prev_gray = gray
+            return img_bgr
+
+        try:
+            flow = cv2.calcOpticalFlowFarneback(
+                self.prev_gray, gray, None,
+                pyr_scale=0.5, levels=3, winsize=15,
+                iterations=3, poly_n=5, poly_sigma=1.2, flags=0
+            )
+            magnitude, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+            blurred_mag = cv2.GaussianBlur(magnitude, (15, 15), 0)
+            norm_mag = cv2.normalize(blurred_mag, None, 0, 255, cv2.NORM_MINMAX)
+            norm_mag_uint8 = norm_mag.astype(np.uint8)
+
+            heatmap = cv2.applyColorMap(norm_mag_uint8, cv2.COLORMAP_JET)
+            blended = cv2.addWeighted(img_bgr, 0.65, heatmap, 0.35, 0)
+            self.prev_gray = gray
+            return blended
+        except Exception:
+            self.prev_gray = gray
+            return img_bgr
 
     def _evaluate_liveness(self, now: float, estimated_ear: float) -> None:
         """Evaluates Eye Aspect Ratio variance to detect static image presentation attacks."""
@@ -242,8 +272,14 @@ class VideoTransformer(VideoTransformerBase):
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img_bgr = frame.to_ndarray(format="bgr24")
         height, width, _ = img_bgr.shape
-        detector = self._get_detector(width, height)
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
+        if StateHolder.enable_xai_heatmap:
+            img_bgr = self._apply_optical_flow_xai(img_bgr, gray)
+        else:
+            self.prev_gray = gray
+
+        detector = self._get_detector(width, height)
         _, faces = detector.detect(img_bgr)
         status_color = (128, 128, 128)
         now = time.time()
@@ -253,6 +289,7 @@ class VideoTransformer(VideoTransformerBase):
 
         self._render_state_badge(img_bgr, width, status_color)
         return av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
+
 
 
 # --- Streamlit Layout Configuration ---
@@ -337,6 +374,13 @@ with st.sidebar:
         with st.spinner("Indexing curriculum documents..."):
             count = rag_engine.ingest_study_materials()
             st.success(f"Indexed {count} text chunks into local vector store.")
+
+    st.markdown("---")
+    st.header("Explainable AI (XAI)")
+    enable_xai = st.checkbox("Enable XAI Heatmap Overlay", value=False)
+    StateHolder.enable_xai_heatmap = enable_xai
+    if enable_xai:
+        st.caption("Visualizing dense optical flow motion magnitudes across facial regions.")
 
     st.markdown("---")
     st.header("Proctoring & Liveness Status")
