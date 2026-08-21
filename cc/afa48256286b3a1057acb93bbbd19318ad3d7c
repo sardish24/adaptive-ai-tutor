@@ -1,0 +1,35 @@
+README.md
+  h_c6066df13fcc8f 77,79,86,95,103,111,118,128,135,141,145,158
+app.py
+  h_c6066df13fcc8f 10,48
+  h_c6066df13fcc8f 1-6,9,14,19,21-23,25,33,38,40-43,47,52,55-59,63-64,72-86,90,94,98,102,105-106,115-119,123,125-129,131-132,134,136,141-142,146,165-181,183-187,191-196,198-199,208-210,215-216,221-224,227,231,238-240,245,260-303,305-306,310-312,314,316-317,322-326,328,330,332-349,351-395,397-437,440-445,447-502,504-506,508-511
+.env.example
+  h_c6066df13fcc8f 2
+.gitignore
+  h_c6066df13fcc8f 8
+PROGRESS.md
+  h_c6066df13fcc8f 6,11,16-22,34
+analytics_engine.py
+  h_c6066df13fcc8f 1-138
+os_tracker.py
+  h_c6066df13fcc8f 1-85
+rag_engine.py
+  h_c6066df13fcc8f 1-5,21-36,38,41-45,55,58-59,63-65,68-77,83,86-100,103-106,110-115,120,151-164,175,187-189
+requirements.txt
+  h_c6066df13fcc8f 10-16
+vector_store.json
+  h_c6066df13fcc8f 1-9242
+youtube_engine.py
+  h_c6066df13fcc8f 1-92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "ccafa48256286b3a1057acb93bbbd19318ad3d7c",
+  "prompts": {},
+  "humans": {
+    "h_c6066df13fcc8f": {
+      "author": "Kaizer-sardish <f20240563@pilani.bits-pilani.ac.in>"
+    }
+  }
+}
