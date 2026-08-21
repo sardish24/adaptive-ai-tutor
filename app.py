@@ -17,6 +17,12 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 
+from constants import (
+    STATE_FOCUSED,
+    STATE_CONFUSED,
+    STATE_DISTRACTED,
+    STATE_DROWSY,
+)
 from rag_engine import RAGEngine
 from os_tracker import tracker_instance, tracking_event_queue
 from youtube_engine import fetch_youtube_transcript, fetch_video_title_metadata
@@ -38,7 +44,7 @@ genai.configure(api_key=api_key)
 # --- Global Shared State ---
 class StateHolder:
     """Thread-safe container holding real-time biometric and telemetry metrics."""
-    current_state: str = "Focused / Attentive"
+    current_state: str = STATE_FOCUSED
     confidence: float = 90.0
     last_metrics: Dict[str, float] = {
         "yaw_ratio": 0.0,
@@ -85,19 +91,19 @@ def classify_cognitive_state(
         Tuple[str, float, Tuple[int, int, int]]: Cognitive state name, confidence %, and RGB color tuple.
     """
     if pitch_ratio > 0.85:
-        state = "Drowsy / Fatigued"
+        state = STATE_DROWSY
         conf = min(98.0, 75.0 + (pitch_ratio - 0.85) * 50)
         color = (0, 0, 255)
     elif abs(yaw_ratio) > 0.28:
-        state = "Distracted / Looking Away"
+        state = STATE_DISTRACTED
         conf = min(95.0, 70.0 + abs(yaw_ratio) * 60)
         color = (0, 165, 255)
     elif abs(roll_deg) > 11.0 or (0.28 <= pitch_ratio <= 0.40):
-        state = "Confused / High Cognitive Load"
+        state = STATE_CONFUSED
         conf = min(92.0, 68.0 + abs(roll_deg) * 2.0)
         color = (0, 255, 255)
     else:
-        state = "Focused / Attentive"
+        state = STATE_FOCUSED
         conf = max(80.0, face_score * 100)
         color = (0, 255, 0)
     return state, conf, color
@@ -196,7 +202,7 @@ class VideoTransformer(VideoTransformerBase):
             smooth_conf = float(np.mean([c for st_name, c in self.state_history if st_name == smooth_state]))
 
             # Sustained off-screen distraction tracker (> 10 seconds)
-            if smooth_state == "Distracted / Looking Away":
+            if smooth_state == STATE_DISTRACTED:
                 if StateHolder.distracted_start_ts == 0.0:
                     StateHolder.distracted_start_ts = now
                 elif now - StateHolder.distracted_start_ts >= 10.0:
@@ -324,7 +330,7 @@ with st.sidebar:
         st.error("Anti-Spoofing: Static presentation attack detected.")
     elif StateHolder.is_distracted_sustained:
         st.error("Proctor Alert: Off-screen gaze detected for > 10 seconds.")
-    elif StateHolder.current_state == "Drowsy / Fatigued":
+    elif StateHolder.current_state == STATE_DROWSY:
         st.warning("Fatigue Notice: Prolonged eye closure or head drooping detected.")
     else:
         st.success("Webcam Proctoring: Verified active.")
@@ -347,7 +353,7 @@ if StateHolder.is_spoof_detected:
 elif StateHolder.is_distracted_sustained:
     st.toast("Proctor Alert: Refocus on study material.", icon=None)
     st.warning("Proctoring Notice: Sustained distraction detected (> 10s off-screen). Refocus on study material.")
-elif StateHolder.current_state == "Drowsy / Fatigued":
+elif StateHolder.current_state == STATE_DROWSY:
     st.warning("Proctoring Notice: Fatigue detected. Consider taking a brief rest interval.")
 
 if st.session_state.youtube_alerts:
@@ -407,18 +413,18 @@ with tab_chat:
             # Adaptive Pedagogical Directives
             current_state = StateHolder.current_state
             
-            if current_state == "Confused / High Cognitive Load":
+            if current_state == STATE_CONFUSED:
                 adaptive_instruction = (
                     "The student's biometric analysis indicates confusion or elevated cognitive load. "
                     "Deconstruct the concept using intuitive analogies, straightforward phrasing, and step-by-step clarity. "
                     "Conclude with a targeted verification question."
                 )
-            elif current_state == "Distracted / Looking Away":
+            elif current_state == STATE_DISTRACTED:
                 adaptive_instruction = (
                     "The student's biometric analysis indicates distraction or off-screen gaze. "
                     "Keep the response concise and engaging (under three paragraphs), concluding with a direct question."
                 )
-            elif current_state == "Drowsy / Fatigued":
+            elif current_state == STATE_DROWSY:
                 adaptive_instruction = (
                     "The student exhibits indicators of fatigue. "
                     "Provide a direct summary in structured bullet points and recommend a brief break or knowledge check."

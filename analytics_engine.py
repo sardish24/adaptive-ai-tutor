@@ -9,15 +9,9 @@ import sqlite3
 import threading
 from typing import List, Dict, Any, Optional
 import pandas as pd
+from constants import STATE_SCORE_MAPPING, STATE_FOCUSED
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "session_telemetry.db")
-
-STATE_SCORE_MAPPING: Dict[str, float] = {
-    "Focused / Attentive": 1.0,
-    "Confused / High Cognitive Load": 0.5,
-    "Distracted / Looking Away": 0.0,
-    "Drowsy / Fatigued": 0.1,
-}
 
 def init_db() -> None:
     """Initializes the SQLite telemetry database schema."""
@@ -58,7 +52,7 @@ class AnalyticsEngine:
             try:
                 now = time.time()
                 dt_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
-                state = getattr(state_holder_ref, "current_state", "Focused / Attentive")
+                state = getattr(state_holder_ref, "current_state", STATE_FOCUSED)
                 confidence = float(getattr(state_holder_ref, "confidence", 90.0))
                 metrics = getattr(state_holder_ref, "last_metrics", {})
                 is_spoof = 1 if getattr(state_holder_ref, "is_spoof_detected", False) else 0
