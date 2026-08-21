@@ -174,7 +174,7 @@ class VideoTransformer(VideoTransformerBase):
     def _update_distraction_tracker(self, smooth_state: str, now: float) -> None:
         """Tracks duration of sustained distraction (> 10 seconds)."""
         if smooth_state == STATE_DISTRACTED:
-            if StateHolder.distracted_start_ts == 0.0:
+            if StateHolder.distracted_start_ts <= 1e-6:
                 StateHolder.distracted_start_ts = now
             elif now - StateHolder.distracted_start_ts >= 10.0:
                 StateHolder.is_distracted_sustained = True

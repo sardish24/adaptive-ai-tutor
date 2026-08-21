@@ -33,7 +33,7 @@ def cosine_similarity(vector_a: List[float], vector_b: List[float]) -> float:
     dot_product = np.dot(arr_a, arr_b)
     norm_a = np.linalg.norm(arr_a)
     norm_b = np.linalg.norm(arr_b)
-    if norm_a == 0.0 or norm_b == 0.0:
+    if norm_a <= 1e-9 or norm_b <= 1e-9:
         return 0.0
     return float(dot_product / (norm_a * norm_b))
 
