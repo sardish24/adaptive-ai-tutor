@@ -306,7 +306,10 @@ def get_rag_engine() -> RAGEngine:
 
 rag_engine = get_rag_engine()
 
-# Free OpenRelay Metered TURN & Google STUN endpoints for cloud traversal
+# Free OpenRelay public TURN credentials (or custom values from secrets/environment)
+turn_user = os.getenv("TURN_USERNAME") or (st.secrets["TURN_USERNAME"] if "TURN_USERNAME" in st.secrets else "openrelayproject")
+turn_cred = os.getenv("TURN_CREDENTIAL") or (st.secrets["TURN_CREDENTIAL"] if "TURN_CREDENTIAL" in st.secrets else "openrelayproject")
+
 DEFAULT_ICE_SERVERS = [
     {"urls": ["stun:stun.l.google.com:19302"]},
     {"urls": ["stun:stun1.l.google.com:19302"]},
@@ -321,17 +324,18 @@ DEFAULT_ICE_SERVERS = [
             "turn:relay.metered.ca:443",
             "turn:relay.metered.ca:443?transport=tcp",
         ],
-        "username": "openrelayproject",
-        "credential": "openrelayproject",
+        "username": turn_user,
+        "credential": turn_cred,
     },
 ]
 
-# Check if custom TURN credentials are provided in Streamlit secrets
-if "TURN_SERVER_URL" in st.secrets:
+# Support custom TURN server URL from Streamlit secrets / environment
+turn_url = os.getenv("TURN_SERVER_URL") or (st.secrets["TURN_SERVER_URL"] if "TURN_SERVER_URL" in st.secrets else None)
+if turn_url:
     DEFAULT_ICE_SERVERS.append({
-        "urls": [st.secrets["TURN_SERVER_URL"]],
-        "username": st.secrets.get("TURN_USERNAME", ""),
-        "credential": st.secrets.get("TURN_CREDENTIAL", ""),
+        "urls": [turn_url],
+        "username": turn_user,
+        "credential": turn_cred,
     })
 
 RTC_CONFIGURATION = {"iceServers": DEFAULT_ICE_SERVERS}
