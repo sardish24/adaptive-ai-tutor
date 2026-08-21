@@ -7,3 +7,10 @@ numpy
 pypdf
 langchain-text-splitters
 python-dotenv
+chromadb
+langchain
+langchain-google-genai
+pygetwindow
+google-api-python-client
+youtube-transcript-api
+plotly

@@ -1,47 +1,67 @@
+"""
+Adaptive AI Tutor Application
+Integrates real-time webcam facial orientation, gaze metrics, anti-spoofing liveness detection,
+OS-level window distraction monitoring, curriculum RAG indexing, and session telemetry analytics.
+"""
+
 import os
 import time
+import queue
+from typing import Tuple, List, Dict, Any, Optional
 import av
 import cv2
 import numpy as np
+import plotly.express as px
 import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
-from rag_engine import RAGEngine
 
-# --- Setup ---
+from rag_engine import RAGEngine
+from os_tracker import tracker_instance, tracking_event_queue
+from youtube_engine import fetch_youtube_transcript, fetch_video_title_metadata
+from analytics_engine import analytics_instance, AnalyticsEngine
+
+# --- Environment & API Configuration ---
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 
-# Fallback to Streamlit secrets (for Streamlit Community Cloud deployment)
 if not api_key and "GEMINI_API_KEY" in st.secrets:
     api_key = st.secrets["GEMINI_API_KEY"]
 
 if not api_key:
-    st.error("GEMINI_API_KEY not found. Please set it in your local .env file or Streamlit Cloud Secrets.")
+    st.error("GEMINI_API_KEY not located. Please define GEMINI_API_KEY in the environment or secrets configuration.")
     st.stop()
 
 genai.configure(api_key=api_key)
 
-# Global shared state container for WebRTC thread -> Streamlit UI communication
+# --- Global Shared State ---
 class StateHolder:
-    current_state = "Focused / Attentive"
-    confidence = 90.0
-    last_metrics = {
+    """Thread-safe container holding real-time biometric and telemetry metrics."""
+    current_state: str = "Focused / Attentive"
+    confidence: float = 90.0
+    last_metrics: Dict[str, float] = {
         "yaw_ratio": 0.0,
         "pitch_ratio": 0.5,
         "roll_deg": 0.0,
-        "mouth_aspect": 0.5
+        "mouth_aspect": 0.5,
+        "ear_value": 0.30
     }
     distracted_start_ts: float = 0.0
     is_distracted_sustained: bool = False
+    is_spoof_detected: bool = False
     last_update_ts: float = time.time()
 
-# --- High-Performance Face and Landmark Detection ---
+# Initialize background services
+tracker_instance.start()
+analytics_instance.start(StateHolder)
+
+# --- OpenCV Face Detector Setup ---
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "face_detection_yunet.onnx")
 MODEL_URL = "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx"
 
-def ensure_model_file():
+def ensure_model_file() -> None:
+    """Verifies that the ONNX face detection model exists locally, downloading if necessary."""
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
     if not os.path.exists(MODEL_PATH):
         import urllib.request
@@ -49,58 +69,81 @@ def ensure_model_file():
 
 ensure_model_file()
 
-def classify_cognitive_state(pitch_ratio: float, yaw_ratio: float, roll_deg: float, face_score: float):
-    """Classifies facial orientation metrics into a cognitive state, confidence, and color."""
+def classify_cognitive_state(
+    pitch_ratio: float, yaw_ratio: float, roll_deg: float, face_score: float
+) -> Tuple[str, float, Tuple[int, int, int]]:
+    """
+    Classifies facial orientation and head pose metrics into defined cognitive states.
+
+    Args:
+        pitch_ratio (float): Vertical gaze displacement ratio.
+        yaw_ratio (float): Horizontal gaze displacement ratio.
+        roll_deg (float): Head tilt angle in degrees.
+        face_score (float): Detection confidence score from face detector.
+
+    Returns:
+        Tuple[str, float, Tuple[int, int, int]]: Cognitive state name, confidence %, and RGB color tuple.
+    """
     if pitch_ratio > 0.85:
         state = "Drowsy / Fatigued"
         conf = min(98.0, 75.0 + (pitch_ratio - 0.85) * 50)
-        color = (0, 0, 255)  # Red
+        color = (0, 0, 255)
     elif abs(yaw_ratio) > 0.28:
         state = "Distracted / Looking Away"
         conf = min(95.0, 70.0 + abs(yaw_ratio) * 60)
-        color = (0, 165, 255)  # Orange
+        color = (0, 165, 255)
     elif abs(roll_deg) > 11.0 or (0.28 <= pitch_ratio <= 0.40):
         state = "Confused / High Cognitive Load"
         conf = min(92.0, 68.0 + abs(roll_deg) * 2.0)
-        color = (0, 255, 255)  # Yellow
+        color = (0, 255, 255)
     else:
         state = "Focused / Attentive"
         conf = max(80.0, face_score * 100)
-        color = (0, 255, 0)  # Green
+        color = (0, 255, 0)
     return state, conf, color
 
-def draw_face_annotations(img_bgr, box, landmarks):
-    """Draws bounding box, facial landmark dots, and connection lines."""
+def draw_face_annotations(img_bgr: np.ndarray, box: np.ndarray, landmarks: np.ndarray) -> None:
+    """Renders bounding box and facial landmark coordinates on the frame."""
     x, y, bw, bh = box
     cv2.rectangle(img_bgr, (x, y), (x + bw, y + bh), (0, 255, 128), 2)
     for pt in landmarks:
         cv2.circle(img_bgr, (int(pt[0]), int(pt[1])), 4, (0, 255, 255), -1)
-    # Contour guide lines
     cv2.line(img_bgr, (int(landmarks[0][0]), int(landmarks[0][1])), (int(landmarks[1][0]), int(landmarks[1][1])), (255, 200, 0), 1)
     cv2.line(img_bgr, (int(landmarks[3][0]), int(landmarks[3][1])), (int(landmarks[4][0]), int(landmarks[4][1])), (255, 200, 0), 1)
 
 class VideoTransformer(VideoTransformerBase):
+    """
+    Processes WebRTC incoming video frames, extracts pose and landmark features,
+    executes anti-spoofing liveness checks, and determines cognitive states.
+    """
+
     def __init__(self):
         self.detector = None
         self.current_size = None
-        self.state_history = []
+        self.state_history: List[Tuple[str, float]] = []
         self.history_len = 15
+        
+        # Anti-spoofing rolling buffer (timestamps and metric samples)
+        self.ear_history: List[Tuple[float, float]] = []
+        self.liveness_window_sec: float = 60.0
+        self.min_samples_for_liveness: int = 150
 
-    def _get_detector(self, w: int, h: int):
-        if self.detector is None or self.current_size != (w, h):
+    def _get_detector(self, width: int, height: int):
+        if self.detector is None or self.current_size != (width, height):
             self.detector = cv2.FaceDetectorYN.create(
-                MODEL_PATH, "", (w, h), score_threshold=0.6, nms_threshold=0.3
+                MODEL_PATH, "", (width, height), score_threshold=0.6, nms_threshold=0.3
             )
-            self.current_size = (w, h)
+            self.current_size = (width, height)
         return self.detector
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img_bgr = frame.to_ndarray(format="bgr24")
-        h, w, _ = img_bgr.shape
-        detector = self._get_detector(w, h)
+        height, width, _ = img_bgr.shape
+        detector = self._get_detector(width, height)
 
         _, faces = detector.detect(img_bgr)
         status_color = (128, 128, 128)
+        now = time.time()
 
         if faces is not None and len(faces) > 0:
             face = faces[0]
@@ -119,20 +162,41 @@ class VideoTransformer(VideoTransformerBase):
             roll_deg = float(np.degrees(np.arctan2(l_eye[1] - r_eye[1], l_eye[0] - r_eye[0])))
             mouth_dist = np.linalg.norm(l_mouth - r_mouth)
 
-            detected_state, conf, status_color = classify_cognitive_state(
-                pitch_ratio, yaw_ratio, roll_deg, face_score
-            )
+            # Eye Aspect Ratio estimation using eye-to-nose vertical distance relative to inter-ocular span
+            estimated_ear = float(np.abs(eye_center[1] - nose[1]) / eye_dist)
 
-            # Temporal smoothing over buffer
-            self.state_history.append(detected_state)
+            # --- Anti-Spoofing Liveness Evaluation ---
+            self.ear_history.append((now, estimated_ear))
+            self.ear_history = [(ts, val) for ts, val in self.ear_history if now - ts <= self.liveness_window_sec]
+
+            if len(self.ear_history) >= self.min_samples_for_liveness:
+                ear_values = [val for _, val in self.ear_history]
+                ear_variance = float(np.var(ear_values))
+                # Static presentation attack flag if variance is below minimum micro-movement threshold
+                if ear_variance < 0.00005:
+                    StateHolder.is_spoof_detected = True
+                else:
+                    StateHolder.is_spoof_detected = False
+            else:
+                StateHolder.is_spoof_detected = False
+
+            # Cognitive classification
+            inst_state, inst_conf, color = classify_cognitive_state(pitch_ratio, yaw_ratio, roll_deg, face_score)
+            status_color = color
+
+            self.state_history.append((inst_state, inst_conf))
             if len(self.state_history) > self.history_len:
                 self.state_history.pop(0)
 
-            smoothed_state = max(set(self.state_history), key=self.state_history.count)
-            now = time.time()
+            # Temporal majority voting smoothing
+            state_counts: Dict[str, int] = {}
+            for st_name, _ in self.state_history:
+                state_counts[st_name] = state_counts.get(st_name, 0) + 1
+            smooth_state = max(state_counts, key=state_counts.get)
+            smooth_conf = float(np.mean([c for st_name, c in self.state_history if st_name == smooth_state]))
 
-            # Track sustained distraction (> 10s)
-            if smoothed_state == "Distracted / Looking Away":
+            # Sustained off-screen distraction tracker (> 10 seconds)
+            if smooth_state == "Distracted / Looking Away":
                 if StateHolder.distracted_start_ts == 0.0:
                     StateHolder.distracted_start_ts = now
                 elif now - StateHolder.distracted_start_ts >= 10.0:
@@ -141,46 +205,50 @@ class VideoTransformer(VideoTransformerBase):
                 StateHolder.distracted_start_ts = 0.0
                 StateHolder.is_distracted_sustained = False
 
-            StateHolder.current_state = smoothed_state
-            StateHolder.confidence = conf
+            # Update shared telemetry
+            StateHolder.current_state = smooth_state
+            StateHolder.confidence = smooth_conf
             StateHolder.last_metrics = {
                 "yaw_ratio": round(float(yaw_ratio), 2),
                 "pitch_ratio": round(float(pitch_ratio), 2),
                 "roll_deg": round(float(roll_deg), 1),
-                "mouth_aspect": round(float(mouth_dist / eye_dist), 2)
+                "mouth_aspect": round(float(mouth_dist / eye_dist), 2),
+                "ear_value": round(estimated_ear, 3)
             }
             StateHolder.last_update_ts = now
 
         # Display Live Cognitive State Badge
-        cv2.rectangle(img_bgr, (10, 10), (w - 10, 50), (20, 20, 20), -1)
+        cv2.rectangle(img_bgr, (10, 10), (width - 10, 50), (20, 20, 20), -1)
+        state_label = "SPOOF DETECTED" if StateHolder.is_spoof_detected else f"State: {StateHolder.current_state} ({int(StateHolder.confidence)}%)"
+        badge_color = (0, 0, 255) if StateHolder.is_spoof_detected else status_color
+
         cv2.putText(
             img_bgr,
-            f"State: {StateHolder.current_state} ({int(StateHolder.confidence)}%)",
+            state_label,
             (20, 38),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.65,
-            status_color,
+            badge_color,
             2,
             cv2.LINE_AA
         )
 
         return av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
 
-# --- Page Config ---
-st.set_page_config(page_title="Adaptive AI Tutor", layout="wide", page_icon="🎓")
-st.title("🎓 Adaptive AI Tutor with RAG & Proctoring")
+# --- Streamlit Layout Configuration ---
+st.set_page_config(page_title="Adaptive AI Tutor", layout="wide")
+st.title("Adaptive AI Tutor with RAG, Proctoring & Telemetry Analytics")
 st.caption("Real-time biometric cognitive state detection feeding dynamically into an adaptive, curriculum-grounded Gemini tutor.")
 
 # --- Initialize RAG Engine ---
 @st.cache_resource
-def get_rag_engine():
+def get_rag_engine() -> RAGEngine:
     rag = RAGEngine()
     rag.ingest_study_materials()
     return rag
 
 rag_engine = get_rag_engine()
 
-# --- STUN Server Configuration for Cloud WebRTC ---
 RTC_CONFIGURATION = {
     "iceServers": [
         {"urls": ["stun:stun.l.google.com:19302"]},
@@ -189,154 +257,255 @@ RTC_CONFIGURATION = {
     ]
 }
 
-# --- Sidebar: Curriculum & Proctoring Panel ---
+# Session State Initialization
+if "youtube_alerts" not in st.session_state:
+    st.session_state.youtube_alerts = []
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Drain OS Window Event Queue
+while not tracking_event_queue.empty():
+    try:
+        event = tracking_event_queue.get_nowait()
+        video_id = event.get("video_id")
+        title = event.get("cleaned_title", "")
+
+        query_text = ""
+        if video_id:
+            transcript = fetch_youtube_transcript(video_id)
+            if transcript:
+                query_text = transcript[:1500]
+            else:
+                meta_title = fetch_video_title_metadata(video_id)
+                query_text = meta_title if meta_title else title
+        else:
+            query_text = title
+
+        if query_text:
+            match_context = rag_engine.retrieve_relevant_context(query_text, top_k=1, min_similarity=0.62)
+            if not match_context:
+                st.session_state.youtube_alerts.append({
+                    "title": title,
+                    "video_id": video_id,
+                    "status": "irrelevant",
+                    "timestamp": time.strftime("%H:%M:%S")
+                })
+            else:
+                st.session_state.youtube_alerts.append({
+                    "title": title,
+                    "video_id": video_id,
+                    "status": "relevant",
+                    "timestamp": time.strftime("%H:%M:%S")
+                })
+    except queue.Empty:
+        break
+
+# --- Sidebar: Curriculum & System Status ---
 with st.sidebar:
-    st.header("📚 Curriculum & Study Materials")
-    st.write("Documents in `./study_materials` are vectorized for grounded tutoring.")
+    st.header("Curriculum & Knowledge Base")
+    st.write("Documents in `./study_materials` are indexed for grounded tutoring.")
     
     study_files = os.listdir(os.path.join(os.path.dirname(__file__), "study_materials"))
     if study_files:
-        st.markdown("**Indexed Materials:**")
-        for f in study_files:
-            st.markdown(f"- 📄 `{f}`")
+        st.markdown("**Indexed Documents:**")
+        for file_name in study_files:
+            st.markdown(f"- `{file_name}`")
     else:
-        st.info("No study files found. Add `.pdf`, `.txt`, or `.md` files to `./study_materials`.")
+        st.info("No documents detected. Add `.pdf`, `.txt`, or `.md` files to `./study_materials`.")
 
-    if st.button("🔄 Re-Index Knowledge Base"):
-        with st.spinner("Indexing study documents..."):
+    if st.button("Re-Index Knowledge Base"):
+        with st.spinner("Indexing curriculum documents..."):
             count = rag_engine.ingest_study_materials()
             st.success(f"Indexed {count} text chunks into local vector store.")
 
     st.markdown("---")
-    st.header("🛡️ Live Proctoring Status")
-    if StateHolder.is_distracted_sustained:
-        st.error("🚨 **PROCTOR ALERT**: Looking away for > 10 seconds.")
+    st.header("Proctoring & Liveness Status")
+    if StateHolder.is_spoof_detected:
+        st.error("Anti-Spoofing: Static presentation attack detected.")
+    elif StateHolder.is_distracted_sustained:
+        st.error("Proctor Alert: Off-screen gaze detected for > 10 seconds.")
     elif StateHolder.current_state == "Drowsy / Fatigued":
-        st.warning("⚠️ **FATIGUE DETECTED**: Student appears drowsy.")
+        st.warning("Fatigue Notice: Prolonged eye closure or head drooping detected.")
     else:
-        st.success("✅ **Proctoring Active**: Normal engagement.")
+        st.success("Webcam Proctoring: Verified active.")
 
-# --- Live Proctoring UI Alerts ---
-if StateHolder.is_distracted_sustained:
-    st.toast("🚨 Proctor Alert: Please lock in and focus on your study materials.", icon="⚠️")
-    st.warning("🚨 **Proctoring Notice**: Sustained distraction detected (> 10s off-screen). Please redirect your focus.", icon="⚠️")
-elif StateHolder.current_state == "Drowsy / Fatigued":
-    st.warning("⚠️ **Proctoring Notice**: Eye closure / head drooping detected. Consider taking a 1-minute stretch break.", icon="☕")
-
-# --- Two-Column Layout ---
-col_chat, col_webcam = st.columns([3, 2], gap="large")
-
-with col_webcam:
-    st.subheader("📹 Real-Time Biometric Stream")
-    webrtc_streamer(
-        key="adaptive-webcam",
-        video_transformer_factory=VideoTransformer,
-        rtc_configuration=RTC_CONFIGURATION,
-        media_stream_constraints={"video": True, "audio": False},
-        async_processing=True,
-    )
-
-    # Live Biometric Metric Display Cards
-    st.markdown("##### 🧠 Cognitive & Proctoring Telemetry")
-    m_col1, m_col2 = st.columns(2)
-    with m_col1:
-        st.metric("Detected State", StateHolder.current_state)
-        st.metric("Head Roll (Tilt)", f"{StateHolder.last_metrics['roll_deg']}°")
-    with m_col2:
-        st.metric("Confidence", f"{int(StateHolder.confidence)}%")
-        st.metric("Gaze Yaw Ratio", f"{StateHolder.last_metrics['yaw_ratio']}")
-
-with col_chat:
-    st.subheader("💬 Curriculum-Grounded Adaptive Chat")
-
-    # Session state init
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    # Render chat history
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if "context" in msg and msg["context"]:
-                with st.expander("📖 Grounded Curriculum Context"):
-                    st.caption(msg["context"])
-
-    # Chat input
-    user_input = st.chat_input("Ask your tutor a question about your study material...")
-
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user"):
-            st.markdown(user_input)
-
-        # 1. RAG Similarity Search in Curriculum Vector Store
-        retrieved_context = rag_engine.retrieve_relevant_context(user_input, top_k=2)
-
-        # 2. Dynamic System Instruction Injection based on live cognitive state + RAG Context
-        current_state = StateHolder.current_state
-        
-        if current_state == "Confused / High Cognitive Load":
-            adaptive_instruction = (
-                "The student's webcam biometric analysis indicates they are CONFUSED or experiencing high cognitive load. "
-                "Break down the answer using intuitive real-world analogies, simpler vocabulary, and step-by-step clarity. "
-                "Conclude with a brief check-in question to verify their understanding."
-            )
-        elif current_state == "Distracted / Looking Away":
-            adaptive_instruction = (
-                "The student's biometric stream indicates they are DISTRACTED or looking away. "
-                "Keep the explanation punchy, engaging, and concise (under 3 paragraphs). "
-                "End with an interactive quick question to pull their attention back."
-            )
-        elif current_state == "Drowsy / Fatigued":
-            adaptive_instruction = (
-                "The student appears DROWSY or fatigued. "
-                "Give a very concise, direct summary in bullet points and suggest a quick 1-minute stretch or interactive quiz."
-            )
+    st.markdown("---")
+    st.header("Active Window Telemetry")
+    active_title = tracker_instance.last_detected_title or "Monitoring..."
+    st.caption(f"**Focused Window:** {active_title[:60]}...")
+    
+    if st.session_state.youtube_alerts:
+        latest_alert = st.session_state.youtube_alerts[-1]
+        if latest_alert["status"] == "irrelevant":
+            st.error(f"Distraction Event ({latest_alert['timestamp']}): Irrelevant media `{latest_alert['title'][:35]}...`")
         else:
-            adaptive_instruction = (
-                "The student is FOCUSED and engaged. "
-                "Deliver a comprehensive, high-quality, structured explanation with standard technical depth."
+            st.info(f"Curriculum Video ({latest_alert['timestamp']}): Relevant media `{latest_alert['title'][:35]}...`")
+
+# --- Notification Banners ---
+if StateHolder.is_spoof_detected:
+    st.error("Liveness Check Failed: Static image detected. Chat input is paused until genuine liveness is verified.")
+elif StateHolder.is_distracted_sustained:
+    st.toast("Proctor Alert: Refocus on study material.", icon=None)
+    st.warning("Proctoring Notice: Sustained distraction detected (> 10s off-screen). Refocus on study material.")
+elif StateHolder.current_state == "Drowsy / Fatigued":
+    st.warning("Proctoring Notice: Fatigue detected. Consider taking a brief rest interval.")
+
+if st.session_state.youtube_alerts:
+    latest_alert = st.session_state.youtube_alerts[-1]
+    if latest_alert["status"] == "irrelevant":
+        st.error(f"Distraction Alert: The media stream opened ({latest_alert['title']}) is unrelated to the active curriculum.")
+
+# --- Primary Tabbed Interface ---
+tab_chat, tab_analytics = st.tabs(["Adaptive Tutoring Session", "Session Analytics & Telemetry"])
+
+with tab_chat:
+    col_chat, col_webcam = st.columns([3, 2], gap="large")
+
+    with col_webcam:
+        st.subheader("Real-Time Biometric Stream")
+        webrtc_streamer(
+            key="adaptive-webcam",
+            video_transformer_factory=VideoTransformer,
+            rtc_configuration=RTC_CONFIGURATION,
+            media_stream_constraints={"video": True, "audio": False},
+            async_processing=True,
+        )
+
+        st.markdown("##### Cognitive & Proctoring Telemetry")
+        metric_col1, metric_col2 = st.columns(2)
+        with metric_col1:
+            st.metric("State Classification", StateHolder.current_state)
+            st.metric("Head Roll (Tilt)", f"{StateHolder.last_metrics['roll_deg']}°")
+        with metric_col2:
+            st.metric("State Confidence", f"{int(StateHolder.confidence)}%")
+            st.metric("Gaze Yaw Ratio", f"{StateHolder.last_metrics['yaw_ratio']}")
+
+    with col_chat:
+        st.subheader("Curriculum-Grounded Adaptive Chat")
+
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+                if "context" in message and message["context"]:
+                    with st.expander("Grounded Curriculum Context"):
+                        st.caption(message["context"])
+
+        if StateHolder.is_spoof_detected:
+            st.info("Chat is temporarily paused due to an unverified liveness state.")
+            user_input = None
+        else:
+            user_input = st.chat_input("Ask a question regarding your study materials...")
+
+        if user_input:
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+            # RAG Context Retrieval
+            retrieved_context = rag_engine.retrieve_relevant_context(user_input, top_k=2)
+
+            # Adaptive Pedagogical Directives
+            current_state = StateHolder.current_state
+            
+            if current_state == "Confused / High Cognitive Load":
+                adaptive_instruction = (
+                    "The student's biometric analysis indicates confusion or elevated cognitive load. "
+                    "Deconstruct the concept using intuitive analogies, straightforward phrasing, and step-by-step clarity. "
+                    "Conclude with a targeted verification question."
+                )
+            elif current_state == "Distracted / Looking Away":
+                adaptive_instruction = (
+                    "The student's biometric analysis indicates distraction or off-screen gaze. "
+                    "Keep the response concise and engaging (under three paragraphs), concluding with a direct question."
+                )
+            elif current_state == "Drowsy / Fatigued":
+                adaptive_instruction = (
+                    "The student exhibits indicators of fatigue. "
+                    "Provide a direct summary in structured bullet points and recommend a brief break or knowledge check."
+                )
+            else:
+                adaptive_instruction = (
+                    "The student is focused and attentive. "
+                    "Provide a comprehensive, high-depth technical explanation."
+                )
+
+            rag_section = (
+                f"\n\n--- OFFICIAL CURRICULUM CONTEXT ---\n{retrieved_context}\n--- END CONTEXT ---\n"
+                "Ground your answer in the official curriculum context when relevant. "
+                "Cite the source material if applicable."
+                if retrieved_context else
+                "\nNo direct study material context found. Answer using authoritative technical principles."
             )
 
-        rag_section = (
-            f"\n\n--- OFFICIAL CURRICULUM CONTEXT ---\n{retrieved_context}\n--- END CONTEXT ---\n"
-            "Ground your answer in the official curriculum context above when relevant. "
-            "Cite the source material if applicable."
-            if retrieved_context else
-            "\nNo direct study material context found. Answer using expert foundational knowledge."
+            full_system_prompt = (
+                "You are an expert, empathetic, and adaptive technical tutor grounded in official study materials.\n\n"
+                f"STUDENT BIOMETRIC STATE: {current_state} (Confidence: {int(StateHolder.confidence)}%)\n"
+                f"PEDAGOGICAL DIRECTIVE: {adaptive_instruction}\n"
+                f"{rag_section}"
+            )
+
+            with st.chat_message("assistant"):
+                with st.spinner(f"Adapting pedagogy to student state ({current_state})..."):
+                    try:
+                        adaptive_model = genai.GenerativeModel(
+                            model_name="gemini-3.6-flash",
+                            system_instruction=full_system_prompt
+                        )
+                        
+                        chat_history = [
+                            {"role": "user" if msg["role"] == "user" else "model", "parts": [msg["content"]]}
+                            for msg in st.session_state.messages[:-1]
+                        ]
+                        chat_session = adaptive_model.start_chat(history=chat_history)
+                        response = chat_session.send_message(user_input)
+                        st.markdown(response.text)
+                        
+                        if retrieved_context:
+                            with st.expander("Grounded Curriculum Context"):
+                                st.caption(retrieved_context)
+
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": response.text,
+                            "context": retrieved_context
+                        })
+                    except Exception as err:
+                        st.error(f"Error communicating with Gemini model: {err}")
+
+with tab_analytics:
+    st.subheader("Session Telemetry & Engagement Analytics")
+    st.caption("Temporal logging of cognitive state classifications and derived focus indices (SQLite Persistence).")
+
+    telemetry_df = AnalyticsEngine.get_session_dataframe(limit=200)
+
+    if not telemetry_df.empty:
+        stat_col1, stat_col2, stat_col3 = st.columns(3)
+        with stat_col1:
+            mean_focus = telemetry_df["focus_score"].mean() * 100
+            st.metric("Mean Focus Index", f"{mean_focus:.1f}%")
+        with stat_col2:
+            total_records = len(telemetry_df)
+            st.metric("Logged Telemetry Points", f"{total_records}")
+        with stat_col3:
+            spoof_count = int(telemetry_df["is_spoof_flag"].sum())
+            st.metric("Spoof Anomalies Flagged", f"{spoof_count}")
+
+        # Render Plotly Time Series Chart
+        fig = px.line(
+            telemetry_df,
+            x="datetime_str",
+            y="focus_score",
+            color="cognitive_state",
+            title="Temporal Focus Score Trajectory",
+            labels={"datetime_str": "Timestamp", "focus_score": "Focus Index (0.0 - 1.0)", "cognitive_state": "Cognitive State"},
+            markers=True,
+            template="plotly_white"
         )
+        fig.update_yaxes(range=[-0.05, 1.05])
+        fig.update_layout(xaxis_tickangle=-45, legend_title_text="Detected State")
+        st.plotly_chart(fig, use_container_width=True)
 
-        full_system_prompt = (
-            "You are an expert, empathetic, and adaptive AI tutor grounded in official study materials.\n\n"
-            f"LIVE STUDENT STATE: {current_state} (Confidence: {int(StateHolder.confidence)}%)\n"
-            f"ADAPTIVE PEDAGOGICAL DIRECTIVE: {adaptive_instruction}\n"
-            f"{rag_section}"
-        )
-
-        with st.chat_message("assistant"):
-            with st.spinner(f"Retrieving curriculum & adapting to state ({current_state})..."):
-                try:
-                    adaptive_model = genai.GenerativeModel(
-                        model_name="gemini-3.6-flash",
-                        system_instruction=full_system_prompt
-                    )
-                    
-                    chat_history = [
-                        {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
-                        for m in st.session_state.messages[:-1]
-                    ]
-                    chat = adaptive_model.start_chat(history=chat_history)
-                    response = chat.send_message(user_input)
-                    st.markdown(response.text)
-                    
-                    if retrieved_context:
-                        with st.expander("📖 Grounded Curriculum Context"):
-                            st.caption(retrieved_context)
-
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": response.text,
-                        "context": retrieved_context
-                    })
-                except Exception as e:
-                    st.error(f"Error communicating with Gemini: {e}")
+        with st.expander("Raw Telemetry Log Table"):
+            st.dataframe(telemetry_df, use_container_width=True)
+    else:
+        st.info("Telemetry data will populate here after initial periodic sampling (5-second intervals).")
