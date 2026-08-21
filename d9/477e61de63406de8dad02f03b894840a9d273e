@@ -1,0 +1,18 @@
+analytics_engine.py
+  h_c6066df13fcc8f 12,55
+app.py
+  h_c6066df13fcc8f 20-25,47,94,98,102,106,205,333,356,416,422,427
+constants.py
+  h_c6066df13fcc8f 1-17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "d9477e61de63406de8dad02f03b894840a9d273e",
+  "prompts": {},
+  "humans": {
+    "h_c6066df13fcc8f": {
+      "author": "Kaizer-sardish <f20240563@pilani.bits-pilani.ac.in>"
+    }
+  }
+}
