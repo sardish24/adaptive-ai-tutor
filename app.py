@@ -306,17 +306,35 @@ def get_rag_engine() -> RAGEngine:
 
 rag_engine = get_rag_engine()
 
-RTC_CONFIGURATION = {
-    "iceServers": [
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:stun2.l.google.com:19302"]},
-        {"urls": ["stun:stun3.l.google.com:19302"]},
-        {"urls": ["stun:stun4.l.google.com:19302"]},
-        {"urls": ["stun:stun.services.mozilla.com"]},
-        {"urls": ["stun:global.stun.twilio.com:3478"]},
-    ]
-}
+# Free OpenRelay Metered TURN & Google STUN endpoints for cloud traversal
+DEFAULT_ICE_SERVERS = [
+    {"urls": ["stun:stun.l.google.com:19302"]},
+    {"urls": ["stun:stun1.l.google.com:19302"]},
+    {"urls": ["stun:stun2.l.google.com:19302"]},
+    {"urls": ["stun:stun3.l.google.com:19302"]},
+    {"urls": ["stun:stun4.l.google.com:19302"]},
+    {"urls": ["stun:stun.services.mozilla.com"]},
+    {"urls": ["stun:relay.metered.ca:80"]},
+    {
+        "urls": [
+            "turn:relay.metered.ca:80",
+            "turn:relay.metered.ca:443",
+            "turn:relay.metered.ca:443?transport=tcp",
+        ],
+        "username": "openrelayproject",
+        "credential": "openrelayproject",
+    },
+]
+
+# Check if custom TURN credentials are provided in Streamlit secrets
+if "TURN_SERVER_URL" in st.secrets:
+    DEFAULT_ICE_SERVERS.append({
+        "urls": [st.secrets["TURN_SERVER_URL"]],
+        "username": st.secrets.get("TURN_USERNAME", ""),
+        "credential": st.secrets.get("TURN_CREDENTIAL", ""),
+    })
+
+RTC_CONFIGURATION = {"iceServers": DEFAULT_ICE_SERVERS}
 
 # Session State Initialization
 if "youtube_alerts" not in st.session_state:
