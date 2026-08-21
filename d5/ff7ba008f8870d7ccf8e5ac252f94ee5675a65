@@ -1,0 +1,14 @@
+README.md
+  h_c6066df13fcc8f 101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "d5ff7ba008f8870d7ccf8e5ac252f94ee5675a65",
+  "prompts": {},
+  "humans": {
+    "h_c6066df13fcc8f": {
+      "author": "Kaizer-sardish <f20240563@pilani.bits-pilani.ac.in>"
+    }
+  }
+}
