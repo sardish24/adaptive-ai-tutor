@@ -98,7 +98,7 @@ Traditional educational platforms operate statically, delivering identical conte
 ## Technology Stack
 
 | Layer | Technologies |
-|---|---|
+| --- | --- |
 | **User Interface & WebRTC** | Streamlit, streamlit-webrtc, PyAV |
 | **Computer Vision & XAI** | OpenCV (YuNet ONNX, Farneback Dense Optical Flow, Jet Colormap), NumPy |
 | **LLM & Embeddings** | Google Gemini Generative API (`gemini-3.6-flash`, `gemini-embedding-001`) |
