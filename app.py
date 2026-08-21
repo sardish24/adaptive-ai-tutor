@@ -142,91 +142,91 @@ class VideoTransformer(VideoTransformerBase):
             self.current_size = (width, height)
         return self.detector
 
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        img_bgr = frame.to_ndarray(format="bgr24")
-        height, width, _ = img_bgr.shape
-        detector = self._get_detector(width, height)
+    def _evaluate_liveness(self, now: float, estimated_ear: float) -> None:
+        """Evaluates Eye Aspect Ratio variance to detect static image presentation attacks."""
+        self.ear_history.append((now, estimated_ear))
+        self.ear_history = [
+            (ts, val) for ts, val in self.ear_history if now - ts <= self.liveness_window_sec
+        ]
 
-        _, faces = detector.detect(img_bgr)
-        status_color = (128, 128, 128)
-        now = time.time()
+        if len(self.ear_history) < self.min_samples_for_liveness:
+            StateHolder.is_spoof_detected = False
+            return
 
-        if faces is not None and len(faces) > 0:
-            face = faces[0]
-            box = face[0:4].astype(int)
-            face_score = float(face[14]) if len(face) > 14 else 0.9
-            landmarks = face[4:14].reshape((5, 2)).astype(float)
+        ear_values = [val for _, val in self.ear_history]
+        ear_variance = float(np.var(ear_values))
+        StateHolder.is_spoof_detected = bool(ear_variance < 0.00005)
 
-            draw_face_annotations(img_bgr, box, landmarks)
+    def _smooth_cognitive_state(self, inst_state: str, inst_conf: float) -> Tuple[str, float]:
+        """Applies rolling window majority voting to smooth instantaneous state classifications."""
+        self.state_history.append((inst_state, inst_conf))
+        if len(self.state_history) > self.history_len:
+            self.state_history.pop(0)
 
-            r_eye, l_eye, nose, r_mouth, l_mouth = landmarks
-            eye_dist = np.linalg.norm(l_eye - r_eye) + 1e-5
-            eye_center = (r_eye + l_eye) / 2.0
+        state_counts: Dict[str, int] = {}
+        for st_name, _ in self.state_history:
+            state_counts[st_name] = state_counts.get(st_name, 0) + 1
 
-            yaw_ratio = (nose[0] - eye_center[0]) / eye_dist
-            pitch_ratio = (nose[1] - eye_center[1]) / eye_dist
-            roll_deg = float(np.degrees(np.arctan2(l_eye[1] - r_eye[1], l_eye[0] - r_eye[0])))
-            mouth_dist = np.linalg.norm(l_mouth - r_mouth)
+        smooth_state = max(state_counts, key=state_counts.get)
+        smooth_conf = float(np.mean([c for st_name, c in self.state_history if st_name == smooth_state]))
+        return smooth_state, smooth_conf
 
-            # Eye Aspect Ratio estimation using eye-to-nose vertical distance relative to inter-ocular span
-            estimated_ear = float(np.abs(eye_center[1] - nose[1]) / eye_dist)
+    def _update_distraction_tracker(self, smooth_state: str, now: float) -> None:
+        """Tracks duration of sustained distraction (> 10 seconds)."""
+        if smooth_state == STATE_DISTRACTED:
+            if StateHolder.distracted_start_ts == 0.0:
+                StateHolder.distracted_start_ts = now
+            elif now - StateHolder.distracted_start_ts >= 10.0:
+                StateHolder.is_distracted_sustained = True
+        else:
+            StateHolder.distracted_start_ts = 0.0
+            StateHolder.is_distracted_sustained = False
 
-            # --- Anti-Spoofing Liveness Evaluation ---
-            self.ear_history.append((now, estimated_ear))
-            self.ear_history = [(ts, val) for ts, val in self.ear_history if now - ts <= self.liveness_window_sec]
+    def _process_face_metrics(self, face: np.ndarray, img_bgr: np.ndarray, now: float) -> Tuple[int, int, int]:
+        """Calculates pose ratios, runs liveness and classification checks, and updates shared state."""
+        box = face[0:4].astype(int)
+        face_score = float(face[14]) if len(face) > 14 else 0.9
+        landmarks = face[4:14].reshape((5, 2)).astype(float)
 
-            if len(self.ear_history) >= self.min_samples_for_liveness:
-                ear_values = [val for _, val in self.ear_history]
-                ear_variance = float(np.var(ear_values))
-                # Static presentation attack flag if variance is below minimum micro-movement threshold
-                if ear_variance < 0.00005:
-                    StateHolder.is_spoof_detected = True
-                else:
-                    StateHolder.is_spoof_detected = False
-            else:
-                StateHolder.is_spoof_detected = False
+        draw_face_annotations(img_bgr, box, landmarks)
 
-            # Cognitive classification
-            inst_state, inst_conf, color = classify_cognitive_state(pitch_ratio, yaw_ratio, roll_deg, face_score)
-            status_color = color
+        r_eye, l_eye, nose, r_mouth, l_mouth = landmarks
+        eye_dist = np.linalg.norm(l_eye - r_eye) + 1e-5
+        eye_center = (r_eye + l_eye) / 2.0
 
-            self.state_history.append((inst_state, inst_conf))
-            if len(self.state_history) > self.history_len:
-                self.state_history.pop(0)
+        yaw_ratio = (nose[0] - eye_center[0]) / eye_dist
+        pitch_ratio = (nose[1] - eye_center[1]) / eye_dist
+        roll_deg = float(np.degrees(np.arctan2(l_eye[1] - r_eye[1], l_eye[0] - r_eye[0])))
+        mouth_dist = np.linalg.norm(l_mouth - r_mouth)
+        estimated_ear = float(np.abs(eye_center[1] - nose[1]) / eye_dist)
 
-            # Temporal majority voting smoothing
-            state_counts: Dict[str, int] = {}
-            for st_name, _ in self.state_history:
-                state_counts[st_name] = state_counts.get(st_name, 0) + 1
-            smooth_state = max(state_counts, key=state_counts.get)
-            smooth_conf = float(np.mean([c for st_name, c in self.state_history if st_name == smooth_state]))
+        self._evaluate_liveness(now, estimated_ear)
 
-            # Sustained off-screen distraction tracker (> 10 seconds)
-            if smooth_state == STATE_DISTRACTED:
-                if StateHolder.distracted_start_ts == 0.0:
-                    StateHolder.distracted_start_ts = now
-                elif now - StateHolder.distracted_start_ts >= 10.0:
-                    StateHolder.is_distracted_sustained = True
-            else:
-                StateHolder.distracted_start_ts = 0.0
-                StateHolder.is_distracted_sustained = False
+        inst_state, inst_conf, color = classify_cognitive_state(pitch_ratio, yaw_ratio, roll_deg, face_score)
+        smooth_state, smooth_conf = self._smooth_cognitive_state(inst_state, inst_conf)
+        self._update_distraction_tracker(smooth_state, now)
 
-            # Update shared telemetry
-            StateHolder.current_state = smooth_state
-            StateHolder.confidence = smooth_conf
-            StateHolder.last_metrics = {
-                "yaw_ratio": round(float(yaw_ratio), 2),
-                "pitch_ratio": round(float(pitch_ratio), 2),
-                "roll_deg": round(float(roll_deg), 1),
-                "mouth_aspect": round(float(mouth_dist / eye_dist), 2),
-                "ear_value": round(estimated_ear, 3)
-            }
-            StateHolder.last_update_ts = now
+        StateHolder.current_state = smooth_state
+        StateHolder.confidence = smooth_conf
+        StateHolder.last_metrics = {
+            "yaw_ratio": round(float(yaw_ratio), 2),
+            "pitch_ratio": round(float(pitch_ratio), 2),
+            "roll_deg": round(float(roll_deg), 1),
+            "mouth_aspect": round(float(mouth_dist / eye_dist), 2),
+            "ear_value": round(estimated_ear, 3)
+        }
+        StateHolder.last_update_ts = now
+        return color
 
-        # Display Live Cognitive State Badge
+    def _render_state_badge(self, img_bgr: np.ndarray, width: int, status_color: Tuple[int, int, int]) -> None:
+        """Renders live cognitive state badge on the top of the video frame."""
         cv2.rectangle(img_bgr, (10, 10), (width - 10, 50), (20, 20, 20), -1)
-        state_label = "SPOOF DETECTED" if StateHolder.is_spoof_detected else f"State: {StateHolder.current_state} ({int(StateHolder.confidence)}%)"
-        badge_color = (0, 0, 255) if StateHolder.is_spoof_detected else status_color
+        if StateHolder.is_spoof_detected:
+            state_label = "SPOOF DETECTED"
+            badge_color = (0, 0, 255)
+        else:
+            state_label = f"State: {StateHolder.current_state} ({int(StateHolder.confidence)}%)"
+            badge_color = status_color
 
         cv2.putText(
             img_bgr,
@@ -239,7 +239,21 @@ class VideoTransformer(VideoTransformerBase):
             cv2.LINE_AA
         )
 
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        img_bgr = frame.to_ndarray(format="bgr24")
+        height, width, _ = img_bgr.shape
+        detector = self._get_detector(width, height)
+
+        _, faces = detector.detect(img_bgr)
+        status_color = (128, 128, 128)
+        now = time.time()
+
+        if faces is not None and len(faces) > 0:
+            status_color = self._process_face_metrics(faces[0], img_bgr, now)
+
+        self._render_state_badge(img_bgr, width, status_color)
         return av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
+
 
 # --- Streamlit Layout Configuration ---
 st.set_page_config(page_title="Adaptive AI Tutor", layout="wide")
